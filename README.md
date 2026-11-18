@@ -1,59 +1,78 @@
-# 映库 · AV Library Manager 0.13.0
+# 映库 · AV Library Manager
 
-Windows 本地影片资料管理器。三类媒体统一管理，卡片调用外部播放器；资料保存在程序旁 app-data。
+映库是一款 Windows 本地影片资料管理工具。将影片文件夹加入资料库后，可以通过封面浏览、搜索和整理影片，并使用外部播放器播放。
 
-0.6.0 按用户确认的 [免配置方案](docs/REQUIREMENTS_UPDATE_0.6.md) 调整：**删除逐帧选图和 FFmpeg/FFprobe 配置，自动读取 Windows 视频缩略图、时长和分辨率**。无法读取的字段显示未知，封面使用占位图；可手动选择本地图片或官方封面。已有人工封面与人工截图保留。
+![映库主界面](docs/screenshots/0.13-library.png)
 
-0.6.1 新增 [诊断日志与一键导出](docs/DIAGNOSTICS_GUIDE.md)，便于另一台电脑出现问题后反馈。自动本地记录并限制容量，不上传私人内容。
+*界面示例使用测试数据。*
 
-0.7.0 完成 [主要 UI 交互调整](docs/UI_USABILITY_0.7.md)：修复自定义标签和分类保存，编辑时创建并选中标签；明确排序/卡片大小，筛选应用/取消、未保存提醒、批量确认、应用内表单和错误反馈。
+## 功能
 
-0.8.0 完成 [可用性与可靠性改进](docs/RELIABILITY_0.8.md)：详情浏览、退出未保存保护、跨目录关联、字幕解绑与原地变更检测、任务分页、播放器自测、搜索和目录扫描优化。
+- **本地资料库**支持扫描影片文件夹，按日本影片、欧美影片和个人片段分类管理。后台读取 Windows 提供的缩略图、时长和分辨率，也可以手动导入封面。
+- **搜索与整理**支持按标题、番号、演员和标签搜索，使用收藏、评分和组合筛选整理资料，支持批量操作。
+- **影片资料**包括片名、演员、厂商、简介、标签和个人笔记。联网资料可以按需手动获取，核对后保存。
+- **播放与字幕**支持系统默认播放器、PotPlayer、mpv 和 VLC，可以匹配或手动选择外挂字幕。
+- **备份与恢复**包含数据库、设置、个人资料和封面。原始视频与外部字幕需要另外备份。
 
-0.8.1 完成 [设置、批量选择与目录迁移改进](docs/USABILITY_0.8.1.md)：扫描间隔统一保存/取消，已选列表数据库分页，目录重叠检查和过期编辑保护。
-
-0.9.0 更新为 [深色磨砂界面](docs/UI_GLASS_0.9.md)，侧边栏、顶部工具栏、卡片与弹窗视觉统一，申请深色原生标题栏。
-
-0.10.0 [精简顶部区域并分离管理入口](docs/UI_REFINEMENT_0.10.md)，采用统一标题栏并保留未保存退出提醒。
-
-0.11.0 [精简浏览与分组筛选](docs/UI_FILTER_0.11.md)：排序菜单、搜索焦点和筛选面板更新，标签下方集中演员与厂商入口。
-
-0.12.0 依用户提供的设计规范改为 [浅色柔光新拟态](docs/UI_SOFT_0.12.md)，全面替换原深色毛玻璃样式。
-
-0.13.0 沿用浅色柔光新拟态。搜索、影片列表和后台任务独立刷新，字幕扫描按文件名和编号匹配，备份恢复先校验数据库和封面资源。变更记录见 [CHANGELOG.md](docs/CHANGELOG.md)。
+影片资料保存在本地。扫描和浏览资料库不需要联网。联网资料查询由用户手动发起，个人片段不会加入联网查询任务。
 
 ## 运行
 
-`release/AVLibrary-0.13.0-Windows-x64.zip` 解压后只有 `AVLibrary.exe`。将它放在本机可写目录运行，首次启动会生成 `app-data`。Windows 需要 WebView2。**无需安装或配置 FFmpeg/FFprobe**。
+需要 Windows x64、Microsoft Edge WebView2 Runtime，以及可用于播放影片的播放器。无需安装或配置 FFmpeg/FFprobe。
 
-添加媒体文件夹并扫描即可建立卡片，缩略图在后台出现。Windows 无法提供缩略图的格式仍可入库和播放，允许手动导入图片。系统缩略图不保证严格为第一帧。
+获得便携版后，解压并运行 `AVLibrary.exe`。首次运行会在程序目录下创建 `app-data`，请将程序放在可写入的文件夹中。
 
-说明、验收和依赖材料见 `release/AVLibrary-0.13.0-Documentation.zip` 与项目 `docs`。
+1. 点击“添加文件夹”，选择影片所在目录和默认分类。
+2. 等待扫描完成，影片会出现在资料库中。
+3. 点击影片封面播放，点击片名查看详情，使用卡片上的菜单编辑资料。
+4. 如需指定播放器或配置资料来源，打开“播放器与资料来源”。
 
-## 已运行验证
+`app-data` 保存数据库、设置和封面。迁移程序或更换电脑时，请关闭程序并一同保留该目录。如果媒体文件的位置改变，可以在“文件夹管理”中重新定位。
 
-- 功能优化阶段通过 63 项 Rust 测试、5 项 SQLite 约束测试和 39 项浏览器界面测试。
-- 恢复新拟态后重新通过 4 项界面检查，覆盖不同窗口宽度、键盘菜单、分组筛选、对比度与凹凸阴影。
-- 媒体处理测试覆盖中文、空格及 `&` 路径下的有效 MP4，以及不支持文件的回退。见 [媒体验证记录](docs/NATIVE_MEDIA_RESULTS.json)。
-- 本次便携发布验证包括 TypeScript/Vite、Windows x64 构建、解压和文件哈希核对。
+## 从源码构建
 
-播放器实际字幕画面、真实来源匹配质量及 Win11/移动盘等验收仍待完成，见 [实现与验收记录](docs/IMPLEMENTATION_STATUS.md)。
+构建需要以下环境。
 
-## 升级与备份
+- Windows x64 和 WebView2 Runtime
+- Node.js 24、npm
+- Rust stable、MSVC 构建工具和 Windows SDK
 
-数据库 schema 仍为 3。升级前备份并退出旧版，替换 EXE 时保留原 app-data。旧 FFmpeg/FFprobe 路径会被忽略。既有人工图片、人工截图、字幕绑定、评分和标签保留。
+在终端中克隆仓库并安装依赖。
 
-## 开发
+```bash
+git clone https://github.com/zengbbxx11/AVLibrary.git
+cd AVLibrary
+npm ci
+```
 
-Node.js、Rust stable、MSVC/Windows SDK 与 WebView2。依赖由 package-lock.json 和 src-tauri/Cargo.lock 锁定。
+运行以下命令启动桌面开发版。
 
-- npm ci
-- npm run dev：只读浏览器预览。
-- npm run build：前端检查/构建。
-- npm test：SQLite 约束测试。
-- npm run test:ui：浏览器 UI 测试。
-- cargo test --locked --manifest-path src-tauri/Cargo.toml：普通后端测试。
-- npm run desktop:build：正式桌面构建。
-- npm run package:portable：生成单 EXE ZIP 和独立文档 ZIP，并解压核对哈希。
+```bash
+npm run desktop:dev
+```
 
-本机可用 scripts/rust-check.cmd / scripts/build-native.cmd 配置 .toolchain 下的编译工具。显式集成测试和复现见 [TESTING.md](docs/TESTING.md)。
+运行以下命令构建 Windows 可执行文件。
+
+```bash
+npm run desktop:build
+```
+
+构建完成后，可执行文件位于 `src-tauri/target/release/av-library-manager.exe`。
+
+## 测试
+
+```bash
+npm run build
+npm test
+npm run test:ui
+cargo test --locked --manifest-path src-tauri/Cargo.toml
+```
+
+UI 测试使用 Chrome 或 Playwright Chromium。详细运行方式见[测试说明](docs/TESTING.md)。
+
+## 文档
+
+- [使用指南](docs/USER_GUIDE.md)
+- [更新记录](docs/CHANGELOG.md)
+- [诊断与日志](docs/DIAGNOSTICS_GUIDE.md)
+- [第三方依赖说明](docs/THIRD_PARTY_NOTICES.txt)
