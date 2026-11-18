@@ -20,7 +20,7 @@
 
 需要 Windows x64、Microsoft Edge WebView2 Runtime，以及可用于播放影片的播放器。无需安装或配置 FFmpeg/FFprobe。
 
-获得便携版后，解压并运行 `AVLibrary.exe`。首次运行会在程序目录下创建 `app-data`，请将程序放在可写入的文件夹中。
+从 [Releases](https://github.com/zengbbxx11/AVLibrary/releases/latest) 下载 Windows x64 便携版，解压后运行 `AVLibrary.exe`。首次运行会在程序目录下创建 `app-data`，请将程序放在可写入的文件夹中。
 
 1. 点击“添加文件夹”，选择影片所在目录和默认分类。
 2. 等待扫描完成，影片会出现在资料库中。
