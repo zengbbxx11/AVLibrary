@@ -1,0 +1,12 @@
+node_modules/
+dist/
+src-tauri/target/
+app-data/
+.npm-cache/
+.toolchain/
+*.log
+test-results/
+playwright-report/
+*.tsbuildinfo
+.qa/
+release/

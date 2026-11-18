@@ -1,0 +1,17 @@
+{
+  "date": "2026-11-14T10:09:01.051Z",
+  "scope": "actual compiled Tauri application commands over its test-only localhost interface; no mock backend",
+  "work": "D:/PrivateVideoManager/.qa/approved-1794650276724",
+  "passed": [
+    "real Tauri IPC, root scan, code identification and automatic subtitle binding",
+    "persistent rating, tags, studio/actor entities and combined filtering",
+    "manual subtitle identity survives external rename",
+    "real file rename preserves personal data",
+    "PNG import, validation and local JPEG thumbnail",
+    "removed item remains ignored during scan and can be restored",
+    "real FFprobe, adjacent frame extraction and selected frame persistence",
+    "database and manual cover resource backup/restore",
+    "Personal classification blocks backend network queue",
+    "configured external player accepted real video and selected subtitle launch arguments"
+  ]
+}

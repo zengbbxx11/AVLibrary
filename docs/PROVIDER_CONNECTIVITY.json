@@ -1,0 +1,26 @@
+{
+  "date": "2026-11-14T08:45:42.750Z",
+  "note": "Connectivity only; not a metadata accuracy or usage-rights assessment",
+  "results": [
+    {
+      "url": "https://www.javlibrary.com/en/",
+      "error": "fetch failed"
+    },
+    {
+      "url": "https://www.iafd.com/",
+      "error": "fetch failed"
+    },
+    {
+      "url": "https://www.jav321.com/",
+      "error": "fetch failed"
+    },
+    {
+      "url": "https://www.javbus.com/",
+      "error": "fetch failed"
+    },
+    {
+      "url": "https://www.javdatabase.com/",
+      "error": "fetch failed"
+    }
+  ]
+}

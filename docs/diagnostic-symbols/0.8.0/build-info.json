@@ -1,0 +1,10 @@
+{
+  "appVersion": "0.8.0",
+  "purpose": "Match numeric frontend diagnostic positions to the exact production bundle; no user data",
+  "files": [
+    {
+      "name": "index-rKi9rLVb.js",
+      "sha256": "a2daa0abc17ca4d9099e96a5ac488c81587a695cc81c2c72e41194c4038e4fe3"
+    }
+  ]
+}

@@ -1,0 +1,10 @@
+{
+  "appVersion": "0.10.0",
+  "purpose": "Match numeric frontend diagnostic positions to the exact production bundle; no user data",
+  "files": [
+    {
+      "name": "index-C5rpCOhS.js",
+      "sha256": "444a98a9a84515c3a5f5030131d15b297c765d6aa5857b2f19cd66a7b25d581f"
+    }
+  ]
+}

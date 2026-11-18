@@ -1,0 +1,7 @@
+{
+  "firstPageQueryMs": 3,
+  "scanMs": 204,
+  "scope": "1000 copies of a valid 2-second synthetic MP4; 10 actual release worker decodes, not diverse user files or UI memory/FPS",
+  "tenDecodeMs": 1378,
+  "version": "0.13.0"
+}

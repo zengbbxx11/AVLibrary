@@ -1,0 +1,19 @@
+{
+  "verifiedAt": "2026-11-18T02:09:59.053Z",
+  "version": "0.13.0",
+  "archive": "release/AVLibrary-0.13.0-Windows-x64.zip",
+  "archiveBytes": 7653736,
+  "archiveSha256": "38a1e7c70f229ce87bd367a442c7727d8ee79f3b152bf69697f0610b321e1a9f",
+  "fileCount": 1,
+  "archiveExtractedAndExeHashVerified": true,
+  "exeWindowsX64": true,
+  "testDebugArgumentAbsent": true,
+  "documentationArchive": "release/AVLibrary-0.13.0-Documentation.zip",
+  "verification": {
+    "rust": 63,
+    "sqliteConstraints": 5,
+    "browserUi": 4,
+    "nativeWorkerScenarios": 2
+  },
+  "acceptanceStatus": "partial; see IMPLEMENTATION_STATUS.md"
+}

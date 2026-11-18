@@ -1,0 +1,10 @@
+{
+  "appVersion": "0.9.0",
+  "purpose": "Match numeric frontend diagnostic positions to the exact production bundle; no user data",
+  "files": [
+    {
+      "name": "index-BciBiBMv.js",
+      "sha256": "5a613e109b857df5dc31f8fd6ee1dacdf34409e2773e71d24249f96e516a4fed"
+    }
+  ]
+}

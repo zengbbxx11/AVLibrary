@@ -1,0 +1,10 @@
+{
+  "appVersion": "0.12.0",
+  "purpose": "Match numeric frontend diagnostic positions to the exact production bundle; no user data",
+  "files": [
+    {
+      "name": "index-CQFrVk2R.js",
+      "sha256": "38328a2357c0784c6ddf26161bbcaa7e0ab710aa20344aab2562e8eb98edc584"
+    }
+  ]
+}

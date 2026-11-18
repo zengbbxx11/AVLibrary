@@ -1,0 +1,37 @@
+{
+  "name": "av-library-manager",
+  "version": "0.13.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "test": "node --test tests/database.test.mjs",
+    "tauri": "tauri",
+    "desktop:dev": "tauri dev",
+    "desktop:build": "tauri build --no-bundle",
+    "test:ui": "playwright test",
+    "format": "prettier --write src vite.config.ts playwright.config.ts tests/ui",
+    "test:backend": "scripts\\rust-check.cmd",
+    "test:media": "scripts\\rust-check.cmd windows_reads_thumbnail_and_properties_without_external_tools -- --nocapture",
+    "test:native:prepare": "node scripts/native-e2e.mjs --prepare",
+    "package:portable": "node scripts/package-portable.mjs"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.12.0",
+    "@tauri-apps/plugin-dialog": "^2.6.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.1",
+    "@tauri-apps/cli": "^2.12.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "prettier": "^3.10.1",
+    "typescript": "^5.9.0",
+    "vite": "^7.2.0"
+  }
+}

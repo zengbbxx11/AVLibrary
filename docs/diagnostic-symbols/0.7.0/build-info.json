@@ -1,0 +1,10 @@
+{
+  "appVersion": "0.7.0",
+  "purpose": "Match numeric frontend diagnostic positions to the exact production bundle; no user data",
+  "files": [
+    {
+      "name": "index-CBLsUhL4.js",
+      "sha256": "11186c26119be6009fa19d4be5dcd2f1bc2ff1ea63344b04c8e8da43cd9bb1d4"
+    }
+  ]
+}

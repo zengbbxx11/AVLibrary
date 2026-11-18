@@ -1,0 +1,38 @@
+{
+  "scenarios": [
+    {
+      "items": 100,
+      "queryP50Ms": 1.0158,
+      "queryP95Ms": 1.4992,
+      "returnedItems": 60,
+      "scanMs": 27.7191,
+      "subtitles": 0
+    },
+    {
+      "items": 1000,
+      "queryP50Ms": 3.8008,
+      "queryP95Ms": 4.405,
+      "returnedItems": 60,
+      "scanMs": 199.0976,
+      "subtitles": 0
+    },
+    {
+      "items": 5000,
+      "queryP50Ms": 16.628899999999998,
+      "queryP95Ms": 17.706,
+      "returnedItems": 60,
+      "scanMs": 1548.0806,
+      "subtitles": 0
+    },
+    {
+      "items": 1000,
+      "queryP50Ms": 6.1753,
+      "queryP95Ms": 7.9822,
+      "returnedItems": 60,
+      "scanMs": 346.4271,
+      "subtitles": 1000
+    }
+  ],
+  "scope": "filesystem enumeration, subtitle matching and SQLite query; synthetic one-byte fixtures, no decoding or UI FPS",
+  "sqliteVersion": "3.54.1"
+}

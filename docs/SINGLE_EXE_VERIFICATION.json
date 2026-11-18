@@ -1,0 +1,12 @@
+{
+  "version": "0.5.1",
+  "archive": "release/AVLibrary-0.5.1-Windows-x64-SingleExe.zip",
+  "fileCount": 1,
+  "executableBytes": 20655616,
+  "archiveBytes": 7450978,
+  "archiveSha256": "08c3e7a671e35a53be681004632a4c4714b75d456bab9212eba4309fd6b1584d",
+  "executableSha256": "f6b76a701ec93a292ffa37793bcae9584129aa99f03656908fdddbe89e34e047",
+  "identicalToVerifiedRelease": true,
+  "existingAppDataUntouched": true,
+  "note": "Personal working copy containing only the executable. Documentation and dependency materials retained in the full package and project docs. Runtime creates app-data; existing WebView2 and user-configured media tools are separate dependencies."
+}

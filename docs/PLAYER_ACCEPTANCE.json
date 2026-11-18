@@ -1,0 +1,32 @@
+{
+  "observedAt": "2026-11-14T13:12:17.510Z",
+  "updateDialogClosed": true,
+  "playerWindowTitle": "\\\\ - PotPlayer",
+  "playerInformation": {
+    "codec": "AVC1",
+    "decoder": "Native D3D9 DXVA VLD Decoder - Intel(R) UHD Graphics 730",
+    "dimensions": "640x360",
+    "sourceFps": 25,
+    "currentFps": "25.218 -> 24.99",
+    "bitrate": "671.5 kbps"
+  },
+  "limitations": [
+    "Cannot attribute this existing playback to the new launch attempt: isolated application did not start",
+    "Window screenshots failed twice with window capture timed out: timed out waiting on channel",
+    "Element-index click failed: coordinate input geometry is unavailable",
+    "Isolated application launch failed: Computer Use app approval timed out",
+    "No visual confirmation of selected subtitle rendering"
+  ],
+  "status": "not passed; desktop tooling prevents required observation",
+  "userReportedManualLaunch": true,
+  "isolatedProcessObserved": false,
+  "isolatedWindowObserved": false,
+  "debugConnectionAvailable": false,
+  "sourceOfPlaybackInformation": "Existing player window only; not evidence for the current isolated build",
+  "remaining": [
+    "Actual selected video/subtitle load from manager",
+    "Player window reuse",
+    "SRT/ASS encoding and styling",
+    "Playback continues after manager exits"
+  ]
+}

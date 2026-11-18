@@ -1,0 +1,10 @@
+{
+  "appVersion": "0.6.1",
+  "purpose": "Match numeric frontend diagnostic positions to the exact production bundle; no user data",
+  "files": [
+    {
+      "name": "index-HjiMlycK.js",
+      "sha256": "77caa00ccae561b0a46c70d7f6614928e8a8914b1cae3c42c279b7971a5d18f7"
+    }
+  ]
+}
