@@ -22,6 +22,27 @@ body {
   color: var(--soft-text);
   background: var(--soft-base);
 }
+html {
+  scrollbar-width: thin;
+  scrollbar-color: #848e9e transparent;
+}
+
+@supports not (scrollbar-width: thin) {
+  html::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  html::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  html::-webkit-scrollbar-thumb {
+    background: #848e9e;
+    border-radius: 8px;
+  }
+  html::-webkit-scrollbar-button {
+    display: none;
+  }
+}
 ::selection {
   background: #c8c0ff;
   color: #25205c;
@@ -51,10 +72,12 @@ textarea {
   border-radius: 16px;
   box-shadow: var(--soft-inset);
 }
-input:focus,
+input:not([type="checkbox"], [type="radio"]):focus,
 select:focus,
 textarea:focus {
-  border-color: rgba(93, 80, 214, 0.35);
+  border-color: transparent;
+  outline: 2px solid var(--soft-accent);
+  outline-offset: -2px;
 }
 input::placeholder,
 textarea::placeholder {
@@ -163,11 +186,8 @@ header {
   box-shadow: var(--soft-inset);
 }
 .search-wrap:focus-within {
-  background: var(--soft-base);
-  border-color: rgba(98, 84, 216, 0.55);
-  box-shadow:
-    var(--soft-inset),
-    0 0 0 2px rgba(98, 84, 216, 0.14);
+  outline: 2px solid var(--soft-accent);
+  outline-offset: -2px;
 }
 .search-wrap input,
 .search-wrap input:focus {
@@ -175,6 +195,7 @@ header {
   background: transparent;
   box-shadow: none;
   border: 0;
+  outline: none;
 }
 .search-wrap input::placeholder {
   color: #667080;
@@ -343,8 +364,14 @@ h3 {
 .card-footer {
   border-color: #cbd1d9;
 }
-.has-sub {
-  color: #257263;
+.subtitle-state[data-state="selected"],
+.subtitle-state[data-state="embedded"] {
+  color: #216252;
+}
+.subtitle-state[data-state="review"],
+.subtitle-state[data-state="missing"],
+.subtitle-state[data-state="invalid"] {
+  color: #8c3d31;
 }
 .offline {
   color: #a24a3c;

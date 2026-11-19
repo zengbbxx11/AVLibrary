@@ -1,6 +1,6 @@
 {
-  "version": "0.13.0",
-  "date": "2026-11-18",
+  "version": "0.13.2",
+  "date": "2026-11-19",
   "scope": "Actual release EXE headless Windows media worker; no Tauri mock, no FFmpeg/FFprobe execution",
   "video": {
     "duration": 2,
@@ -13,6 +13,6 @@
     "thumbnail": null,
     "note": "Windows 未提供视频缩略图，可导入本地封面图片"
   },
-  "thumbnail": "D:\\PrivateVideoManager\\.qa\\native-worker-CTWCbP\\windows-thumbnail.jpg",
+  "thumbnail": "D:\\PrivateVideoManager\\.qa\\native-worker-Yt4G9K\\windows-thumbnail.jpg",
   "passed": 2
 }

@@ -144,11 +144,22 @@ export function minutes(n: number | null) {
   const seconds = Math.max(1, Math.round(n));
   return seconds < 60 ? seconds + " 秒" : Math.floor(seconds / 60) + " 分钟";
 }
-export const subtitleNames: Record<string, string> = {
-  selected: "外挂已选",
-  missing: "字幕不可用",
+export const subtitleNames = {
+  selected: "外挂字幕已关联",
+  missing: "字幕文件不可用",
   invalid: "字幕文件已变化",
-  embedded: "内嵌可用",
-  unknown: "内嵌未检测",
-  unselected: "未选外挂",
+  embedded: "有内嵌字幕",
+  unknown: "未关联外挂 · 内嵌未检测",
+  unselected: "未关联外挂 · 无内嵌",
+  review: "字幕待确认",
 };
+
+export function subtitleStatus(item: Item): keyof typeof subtitleNames {
+  const state = item.subtitleState;
+  if (state === "missing" || state === "invalid") return state;
+  if (item.subtitleConfirmation === "needs_review") return "review";
+  if (state === "selected" || item.subtitle) return "selected";
+  if (state === "embedded" || (item.embeddedSubtitles ?? 0) > 0)
+    return "embedded";
+  return item.embeddedSubtitles === 0 ? "unselected" : "unknown";
+}

@@ -1,7 +1,27 @@
 import React, { useEffect, useState, useRef } from "react";
+import { Subtitles } from "lucide-react";
 import { api } from "./api";
 import { Modal } from "./ui";
-import { Item, Filters, Tag, Catalog, mediaNames, minutes } from "./types";
+import {
+  Item,
+  Filters,
+  Tag,
+  Catalog,
+  mediaNames,
+  minutes,
+  subtitleNames,
+  subtitleStatus,
+} from "./types";
+
+export function SubtitleStatus({ item }: { item: Item }) {
+  const state = subtitleStatus(item);
+  return (
+    <span className="subtitle-state" data-state={state}>
+      <Subtitles size={14} aria-hidden="true" />
+      {subtitleNames[state]}
+    </span>
+  );
+}
 export function FilterSummary({
   filters,
   tags,
@@ -87,6 +107,7 @@ export function FilmDetails({
         {mediaNames[item.mediaType]} · {minutes(item.duration)} ·{" "}
         {item.rating ? item.rating + " 星" : "未评分"}
       </p>
+      <SubtitleStatus item={item} />
       <p>{item.performers?.join("、") || "未填写演员"}</p>
       <p>{item.description || "暂无简介"}</p>
       <p>{item.note || "暂无笔记"}</p>

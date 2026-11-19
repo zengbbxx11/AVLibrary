@@ -96,6 +96,18 @@ async function fixture(page: Page) {
         }
         if (cmd === "list_items") {
           if (w.failList) throw "测试资料读取失败";
+          if (w.scopeLibrary) {
+            if (args.filters?.targetId && w.deferLocation) {
+              await new Promise<void>((resolve) => {
+                w.finishLocation = resolve;
+              });
+            }
+            const matches =
+              !args.removed &&
+              (!args.mediaType || args.mediaType === item.mediaType) &&
+              (!args.query || item.code.includes(args.query));
+            return { items: matches ? [item] : [], total: matches ? 1 : 0 };
+          }
           if (args.query && w.searchResults) {
             const result = {
               items: [{ ...item, title: args.query + " 结果" }],
@@ -390,6 +402,17 @@ test("filter drafts cancel, validate then apply and sorting preferences survive 
       ),
     ),
   ).toBe(true);
+  await page.evaluate(() =>
+    localStorage.setItem(
+      "avlibrary-view",
+      JSON.stringify({ size: 340, sort: "rating" }),
+    ),
+  );
+  await page.reload();
+  const size = page.getByRole("combobox", { name: "卡片大小" });
+  await expect(size).toContainText("中");
+  await size.click();
+  await expect(page.getByRole("option")).toHaveText(["小", "中"]);
 });
 test("modal keyboard focus is trapped, Escape protects settings and focus returns to opener", async ({
   page,
@@ -885,7 +908,17 @@ test("removing final item on last page returns to valid page", async ({
   await fixture(page);
   await page.evaluate(() => ((window as any).largeLibrary = true));
   await page.getByRole("button", { name: "刷新", exact: true }).click();
-  await page.getByRole("button", { name: "下一页", exact: true }).click();
+  const nextPage = page.getByRole("button", { name: "下一页", exact: true });
+  await nextPage.focus();
+  await expect
+    .poll(() => page.evaluate(() => window.scrollY))
+    .toBeGreaterThan(0);
+  await nextPage.press("Enter");
+  await expect(page.getByRole("heading", { name: "影片资料库" })).toBeFocused();
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
+  await expect(
+    page.getByRole("navigation", { name: "资料库分页" }),
+  ).toContainText("第 2 / 2 页");
   await page.getByRole("button", { name: "批量管理", exact: true }).click();
   await page.getByRole("button", { name: "选中本页", exact: true }).click();
   await page.getByRole("button", { name: "移出库", exact: true }).click();
@@ -897,6 +930,106 @@ test("removing final item on last page returns to valid page", async ({
   await page.screenshot({
     path: ".qa/ui/library-60-cards.png",
   });
+});
+
+test("batch selections do not cross into or out of removed items", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.getByRole("button", { name: "批量管理", exact: true }).click();
+  await page.getByRole("button", { name: "选中本页", exact: true }).click();
+  await expect(page.locator(".bulk-bar")).toContainText("已选 1 部");
+  await page.getByRole("button", { name: "已移出项目", exact: true }).click();
+  await expect(page.locator(".bulk-bar")).toContainText("已选 0 部");
+  await expect(
+    page.getByRole("button", { name: "恢复", exact: true }),
+  ).toBeDisabled();
+  await page.getByRole("button", { name: "全部影片", exact: true }).click();
+  await expect(page.locator(".bulk-bar")).toContainText("已选 0 部");
+});
+
+test("empty category offers a route back to the populated library", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.evaluate(() => Object.assign(window, { scopeLibrary: true }));
+  await page.getByRole("button", { name: "欧美影片", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "暂无欧美影片" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "查看全部影片" }).click();
+  await expect(page.getByRole("heading", { name: "测试影片" })).toBeVisible();
+});
+
+test("empty search in removed items clears the search and returns to all films", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.evaluate(() => Object.assign(window, { scopeLibrary: true }));
+  await page.getByRole("button", { name: "已移出项目" }).click();
+  const search = page.getByRole("textbox", { name: "搜索影片" });
+  await search.fill("MISSING");
+  await search.press("Enter");
+  await expect(
+    page.getByRole("heading", { name: "没有找到匹配的移出项目" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "查看全部影片" }).click();
+  await expect(page.getByRole("heading", { name: "影片资料库" })).toBeFocused();
+  await expect(search).toHaveValue("");
+  await expect(page.getByRole("heading", { name: "测试影片" })).toBeVisible();
+});
+
+test("subtitle cards distinguish available, unverified and broken subtitles", async ({
+  page,
+}) => {
+  await fixture(page);
+  const cases = [
+    ["unknown", null, null, "unselected", "未关联外挂 · 内嵌未检测"],
+    ["unselected", null, 0, "unselected", "未关联外挂 · 无内嵌"],
+    ["embedded", null, 1, "unselected", "有内嵌字幕"],
+    [
+      "selected",
+      "D:/fixtures/first.srt",
+      null,
+      "manual_confirmed",
+      "外挂字幕已关联",
+    ],
+    ["selected", "D:/fixtures/first.srt", null, "needs_review", "字幕待确认"],
+    [
+      "missing",
+      "D:/fixtures/first.srt",
+      null,
+      "needs_review",
+      "字幕文件不可用",
+    ],
+    [
+      "invalid",
+      "D:/fixtures/first.srt",
+      null,
+      "needs_review",
+      "字幕文件已变化",
+    ],
+  ] as const;
+  for (const [
+    subtitleState,
+    subtitle,
+    embeddedSubtitles,
+    subtitleConfirmation,
+    label,
+  ] of cases) {
+    await page.evaluate((data) => Object.assign((window as any).item, data), {
+      subtitleState,
+      subtitle,
+      embeddedSubtitles,
+      subtitleConfirmation,
+    });
+    await page.getByRole("button", { name: "刷新", exact: true }).click();
+    await expect(page.locator(".card .subtitle-state")).toHaveText(label);
+  }
+  await page.getByRole("button", { name: "测试影片", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "测试影片" })).toContainText(
+    "字幕文件已变化",
+  );
 });
 test("subtitle candidates beyond first page are accessible and unbinding is explicit", async ({
   page,
@@ -1205,11 +1338,130 @@ test("compact menus support keyboard selection and escape; search has a single f
   await search.focus();
   const styles = await search.evaluate((el) => ({
     outline: getComputedStyle(el).outlineStyle,
+    parentOutline: getComputedStyle(el.parentElement!).outlineWidth,
     parentShadow: getComputedStyle(el.parentElement!).boxShadow,
   }));
   expect(styles.outline).toBe("none");
+  expect(styles.parentOutline).toBe("2px");
   expect(styles.parentShadow).not.toBe("none");
+  await page
+    .getByRole("button", { name: "编辑 测试影片", exact: true })
+    .click();
+  const editor = page.getByRole("dialog", { name: "编辑影片" });
+  await editor.getByLabel("显示名称", { exact: true }).click();
+  await expect(editor.getByLabel("显示名称", { exact: true })).toBeFocused();
+  await page.keyboard.press("Tab");
+  const current = editor.locator(":focus");
+  const field = await current.evaluate((el) => {
+    const style = getComputedStyle(el);
+    return {
+      border: style.borderTopColor,
+      outline: style.outlineWidth,
+      offset: style.outlineOffset,
+    };
+  });
+  expect(field).toEqual({
+    border: "rgba(0, 0, 0, 0)",
+    outline: "2px",
+    offset: "-2px",
+  });
 });
+
+test("composing search text does not submit and suggestions return focus on Escape", async ({
+  page,
+}) => {
+  await fixture(page);
+  const search = page.getByLabel("搜索影片");
+  await search.focus();
+  await search.dispatchEvent("compositionstart");
+  await search.fill("ceshi");
+  await search.dispatchEvent("keydown", { key: "Enter", isComposing: true });
+  await page.waitForTimeout(300);
+  const submitted = await page.evaluate(() =>
+    (window as any).calls.some(
+      (call: any) => call.cmd === "list_items" && call.args.query === "ceshi",
+    ),
+  );
+  expect(submitted).toBe(false);
+  await search.fill("测试");
+  await search.dispatchEvent("compositionend", { data: "测试" });
+  const suggestion = page.locator("#search-suggestions button").first();
+  await expect(suggestion).toBeVisible();
+  await search.press("ArrowDown");
+  await expect(suggestion).toBeFocused();
+  await suggestion.press("Escape");
+  await expect(search).toBeFocused();
+  await expect(suggestion).toHaveCount(0);
+  await page.getByRole("button", { name: "清空搜索" }).click();
+  await expect(search).toBeFocused();
+  await expect(search).toHaveValue("");
+});
+test("keyboard selection transfers focus to a visible search result card", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.evaluate(() => Object.assign(window, { scopeLibrary: true }));
+  const search = page.getByRole("textbox", { name: "搜索影片" });
+  await search.fill("TEST-001");
+  const suggestion = page.locator("#search-suggestions button");
+  await expect(suggestion).toBeVisible();
+  const card = page.getByRole("article", { name: "测试影片" });
+  await expect(card).toBeVisible();
+  await search.press("ArrowDown");
+  await suggestion.press("Enter");
+  await expect(card).toBeFocused();
+  await expect(card).toHaveClass(/highlight/);
+  await page.keyboard.press("Tab");
+  await expect(
+    page.getByRole("button", { name: "播放 测试影片" }),
+  ).toBeFocused();
+});
+
+test("locating a result outside the current scope waits for its card to render", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.evaluate(() =>
+    Object.assign(window, { scopeLibrary: true, deferLocation: true }),
+  );
+  await page.getByRole("button", { name: "欧美影片", exact: true }).click();
+  const search = page.getByRole("textbox", { name: "搜索影片" });
+  const suggestion = page.locator("#search-suggestions button");
+  const title = page.getByRole("heading", { name: "影片资料库" });
+  const card = page.getByRole("article", { name: "测试影片" });
+
+  async function locateResult() {
+    await search.fill("TEST-001");
+    await expect(suggestion).toBeVisible();
+    await search.press("ArrowDown");
+    await suggestion.press("Enter");
+    await expect(title).toBeFocused();
+    await expect(card).toHaveCount(0);
+    await expect
+      .poll(() => page.evaluate(() => typeof (window as any).finishLocation))
+      .toBe("function");
+  }
+  const finishLocation = () =>
+    page.evaluate(() => {
+      const fixture = window as any;
+      fixture.finishLocation();
+      fixture.finishLocation = undefined;
+    });
+  await locateResult();
+  await finishLocation();
+  await expect(card).toBeFocused();
+  await page.getByRole("button", { name: "恢复原筛选" }).click();
+  await expect(
+    page.getByRole("heading", { name: "没有找到匹配影片" }),
+  ).toBeVisible();
+
+  await locateResult();
+  await search.focus();
+  await finishLocation();
+  await expect(card).toBeVisible();
+  await expect(search).toBeFocused();
+});
+
 test("grouped filter choices apply, cancel and protect against external filter changes", async ({
   page,
 }) => {
@@ -1402,6 +1654,7 @@ test("neumorphic theme restores raised and inset surfaces with readable navigati
     const bg = lum(parse(style(".card").backgroundColor));
     return {
       scheme: getComputedStyle(document.documentElement).colorScheme,
+      scrollbarWidth: getComputedStyle(document.documentElement).scrollbarWidth,
       body: style("body").backgroundColor,
       sidebarBlur: style(".sidebar").backdropFilter,
       headerBlur: style("header").backdropFilter,
@@ -1414,6 +1667,7 @@ test("neumorphic theme restores raised and inset surfaces with readable navigati
     };
   });
   expect(colors.scheme).toBe("light");
+  expect(colors.scrollbarWidth).toBe("thin");
   expect(colors.body).toBe("rgb(224, 229, 236)");
   expect(colors.sidebarBlur).toBe("none");
   expect(colors.headerBlur).toBe("none");

@@ -55,14 +55,18 @@ import {
   mediaNames,
   bytes,
   minutes,
-  subtitleNames,
   Filters,
   normalizeFilters,
   Catalog,
   Entity,
   Provider,
 } from "./types";
-import { FilterSummary, FilmDetails, SelectionDialog } from "./workflows";
+import {
+  FilterSummary,
+  FilmDetails,
+  SelectionDialog,
+  SubtitleStatus,
+} from "./workflows";
 import { CompactSelect } from "./compact-select";
 import { FilterPanel } from "./filter-panel";
 import "./style.css";
@@ -79,7 +83,7 @@ function readView() {
   try {
     const v = JSON.parse(localStorage.getItem("avlibrary-view") || "{}");
     return {
-      size: [230, 280, 340].includes(v.size) ? v.size : 280,
+      size: v.size === 230 ? 230 : 280,
       sort: ["activity", "added", "title", "rating", "duration"].includes(
         v.sort,
       )
@@ -116,7 +120,7 @@ function App() {
 
   const [query, setQuery] = useState(""),
     [type, setType] = useState(""),
-    [removed, setRemoved] = useState(false),
+    [removed, setRemovedView] = useState(false),
     [page, setPage] = useState(0),
     [size, setSize] = useState<number>(() => readView().size),
     [filters, setFilters] = useState<Filters>({}),
@@ -157,6 +161,10 @@ function App() {
   const [actorText, setActorText] = useState("");
   const actorBaseline = useRef("");
   const [searchQuery, setSearchQuery] = useState("");
+  const [composingSearch, setComposingSearch] = useState(false);
+  const searchInput = useRef<HTMLInputElement>(null);
+  const libraryTitle = useRef<HTMLHeadingElement>(null);
+  const pendingLocation = useRef<string | null>(null);
   const [jobTab, setJobTab] = useState<JobScope>("active"),
     [jobPage, setJobPage] = useState(0);
   const [subPage, setSubPage] = useState(0);
@@ -202,7 +210,7 @@ function App() {
       limit: PAGE_SIZE,
       filters: { ...filters, sort },
     },
-    query === searchQuery,
+    composingSearch || query === searchQuery,
     panel === "jobs",
     jobTab,
     jobPage,
@@ -211,11 +219,17 @@ function App() {
   );
   const suggestions =
     suggestionResults?.query === query ? suggestionResults.items : [];
-  const offlineRoots = new Set(roots.filter((root) => !root.online).map((root) => root.id));
+  const showSuggestions = focus && !composingSearch && suggestions.length > 0;
+  const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const hasSearchCriteria = !!query.trim() || Object.keys(filters).length > 0;
+  const offlineRoots = new Set(
+    roots.filter((root) => !root.online).map((root) => root.id),
+  );
   useEffect(() => {
+    if (composingSearch) return;
     const timer = setTimeout(() => setSearchQuery(query), 220);
     return () => clearTimeout(timer);
-  }, [query]);
+  }, [query, composingSearch]);
   useEffect(() => {
     try {
       localStorage.setItem("avlibrary-view", JSON.stringify({ size, sort }));
@@ -223,7 +237,7 @@ function App() {
   }, [size, sort]);
   useEffect(() => setActionError(""), [panel, editing?.id, entityDraft?.name]);
   useEffect(() => {
-    if (!focus || !query.trim()) return;
+    if (!focus || composingSearch || !query.trim()) return;
     let live = true;
     const timer = setTimeout(() => {
       libraryApi
@@ -244,13 +258,24 @@ function App() {
       live = false;
       clearTimeout(timer);
     };
-  }, [focus, query]);
+  }, [focus, query, composingSearch]);
   useEffect(() => {
     if (toast) {
       const t = setTimeout(() => setToast(""), 5500);
       return () => clearTimeout(t);
     }
   }, [toast]);
+  useEffect(() => {
+    const id = pendingLocation.current;
+    if (!id) return;
+    if (filters.targetId !== id) {
+      pendingLocation.current = null;
+      return;
+    }
+    if (loading) return;
+    pendingLocation.current = null;
+    if (document.activeElement === libraryTitle.current) focusLocatedCard(id);
+  }, [filters.targetId, loading]);
   async function action(
     label: string,
     fn: () => Promise<unknown>,
@@ -392,13 +417,38 @@ function App() {
       v.includes(id) ? v.filter((i) => i !== id) : [...v, id],
     );
   }
+  function setRemoved(value: boolean) {
+    if (value === removed) return;
+    setSelected([]);
+    setRemovedView(value);
+  }
+  function changePage(next: number) {
+    setPage(next);
+    libraryTitle.current?.focus({ preventScroll: true });
+    window.scrollTo(0, 0);
+  }
+  function showAllFilms() {
+    setQuery("");
+    setSearchQuery("");
+    setFilters({});
+    setType("");
+    setRemoved(false);
+    setPrevious(null);
+    setHighlight("");
+    setFocus(false);
+    changePage(0);
+  }
+  function focusLocatedCard(id: string) {
+    const card = document.getElementById("item-" + id);
+    card?.focus({ preventScroll: true });
+    card?.scrollIntoView({ block: "center" });
+  }
   function locate(item: Item) {
+    setFocus(false);
     if (items.some((i) => i.id === item.id)) {
-      setFocus(false);
+      pendingLocation.current = null;
       setHighlight(item.id);
-      document
-        .getElementById("item-" + item.id)
-        ?.scrollIntoView({ block: "center", behavior: "smooth" });
+      focusLocatedCard(item.id);
       return;
     }
     setPrevious({ type, filters, query, page, removed });
@@ -407,7 +457,9 @@ function App() {
     setRemoved(false);
     setPage(0);
     setFilters({ targetId: item.id });
-    setFocus(false);
+    setHighlight("");
+    pendingLocation.current = item.id;
+    libraryTitle.current?.focus({ preventScroll: true });
   }
   async function edit(item: Item) {
     const value = {
@@ -755,12 +807,7 @@ function App() {
             type="button"
             className="brand"
             aria-label="返回影片库"
-            onClick={() => {
-              setQuery("");
-              setType("");
-              setFilter({});
-              setRemoved(false);
-            }}
+            onClick={showAllFilms}
           >
             <span className="brand-icon">
               <Film size={23} />
@@ -918,7 +965,7 @@ function App() {
         </aside>
         <main>
           <header className="library-header">
-            <h1>
+            <h1 ref={libraryTitle} tabIndex={-1}>
               {removed
                 ? "已移出项目"
                 : type
@@ -934,26 +981,43 @@ function App() {
             >
               <Search size={19} />
               <input
+                ref={searchInput}
                 aria-label="搜索影片"
-                aria-expanded={focus && suggestions.length > 0}
-                aria-controls="search-suggestions"
+                aria-expanded={showSuggestions}
+                aria-controls={
+                  showSuggestions ? "search-suggestions" : undefined
+                }
                 placeholder="搜索番号、片名、演员、标签…"
                 value={query}
                 onChange={(e) => {
                   setQuery(e.target.value);
+                  setFocus(true);
+                  if (
+                    !composingSearch &&
+                    !(e.nativeEvent as InputEvent).isComposing
+                  ) {
+                    setPage(0);
+                    if (filters.targetId) setFilters({});
+                  }
+                }}
+                onCompositionStart={() => setComposingSearch(true)}
+                onCompositionEnd={(e) => {
+                  setComposingSearch(false);
+                  setQuery(e.currentTarget.value);
                   setPage(0);
                   if (filters.targetId) setFilters({});
                 }}
                 onFocus={() => setFocus(true)}
                 onKeyDown={(e) => {
+                  if (composingSearch || e.nativeEvent.isComposing) return;
                   if (e.key === "Escape" || e.key === "Enter") {
                     if (e.key === "Enter") setSearchQuery(query);
                     setFocus(false);
                   }
-                  if (e.key === "ArrowDown") {
+                  if (e.key === "ArrowDown" && showSuggestions) {
                     e.preventDefault();
-                    document
-                      .querySelector<HTMLButtonElement>(
+                    e.currentTarget.parentElement
+                      ?.querySelector<HTMLButtonElement>(
                         "#search-suggestions button",
                       )
                       ?.focus();
@@ -966,17 +1030,39 @@ function App() {
                   aria-label="清空搜索"
                   onClick={() => {
                     setQuery("");
+                    setSearchQuery("");
                     setPage(0);
                     if (filters.targetId)
                       setFilter({ ...filters, targetId: undefined });
+                    searchInput.current?.focus();
                     setFocus(false);
                   }}
                 >
                   <X size={16} />
                 </button>
               )}
-              {focus && suggestions.length > 0 && (
-                <div className="suggestions" id="search-suggestions">
+              {showSuggestions && (
+                <div
+                  className="suggestions"
+                  id="search-suggestions"
+                  onKeyDown={(e) => {
+                    if (e.key === "Escape") {
+                      searchInput.current?.focus();
+                      setFocus(false);
+                    } else if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                      e.preventDefault();
+                      const buttons = Array.from(
+                        e.currentTarget.querySelectorAll("button"),
+                      );
+                      const index = buttons.findIndex(
+                        (button) => button === e.target,
+                      );
+                      const next = index + (e.key === "ArrowDown" ? 1 : -1);
+                      if (next < 0) searchInput.current?.focus();
+                      else buttons[next]?.focus();
+                    }
+                  }}
+                >
                   {suggestions.map((i) => (
                     <button key={i.id} onClick={() => locate(i)}>
                       <Film size={18} />
@@ -1100,7 +1186,6 @@ function App() {
                     options={[
                       { value: "230", label: "小" },
                       { value: "280", label: "中" },
-                      { value: "340", label: "大" },
                     ]}
                   />
                 </div>
@@ -1232,6 +1317,7 @@ function App() {
                   查看已选影片
                 </button>
                 <button
+                  disabled={loading || items.length === 0}
                   onClick={() =>
                     setSelected((v) =>
                       Array.from(new Set([...v, ...items.map((i) => i.id)])),
@@ -1329,6 +1415,8 @@ function App() {
                   <article
                     key={item.id}
                     id={"item-" + item.id}
+                    tabIndex={-1}
+                    aria-labelledby={"item-title-" + item.id}
                     className={
                       "card " +
                       (selected.includes(item.id) ? "selected " : "") +
@@ -1397,7 +1485,7 @@ function App() {
                     </div>
                     <div className="card-body">
                       <div className="row title-row">
-                        <h2 title={item.title}>
+                        <h2 id={"item-title-" + item.id} title={item.title}>
                           <button
                             className="title-button"
                             onClick={() => setDetail(item)}
@@ -1454,17 +1542,7 @@ function App() {
                         </span>
                       </div>
                       <div className="card-footer">
-                        <span
-                          className={
-                            "subtitle-state " + (item.subtitle ? "has-sub" : "")
-                          }
-                        >
-                          <Subtitles size={13} />
-                          {item.subtitleConfirmation === "needs_review"
-                            ? "字幕待确认"
-                            : subtitleNames[item.subtitleState] ||
-                              (item.subtitle ? "外挂已选" : "未选外挂")}
-                        </span>
+                        <SubtitleStatus item={item} />
                         {(!item.available || offlineRoots.has(item.rootId)) && (
                           <button
                             type="button"
@@ -1492,39 +1570,30 @@ function App() {
                 </div>
                 <h2>
                   {removed
-                    ? "暂无移出项目"
-                    : query || Object.keys(filters).length
+                    ? hasSearchCriteria
+                      ? "没有找到匹配的移出项目"
+                      : "暂无移出项目"
+                    : hasSearchCriteria
                       ? "没有找到匹配影片"
-                      : "从一个文件夹开始"}
+                      : type
+                        ? "暂无" + mediaNames[type as MediaType]
+                        : "从一个文件夹开始"}
                 </h2>
                 <p>
-                  {removed
-                    ? "移出的影片会保留个人资料，可在这里恢复。"
-                    : query || Object.keys(filters).length || type
-                      ? "可以清除搜索和筛选条件，或切换到全部影片。"
-                      : "添加本地影片，建立属于你的私人资料库。先扫描本地，联网资料由你手动获取。"}
+                  {hasSearchCriteria
+                    ? "可以调整搜索或筛选条件，或查看全部影片。"
+                    : removed
+                      ? "移出的影片会保留个人资料，可在这里恢复。"
+                      : type
+                        ? "可以查看全部影片，或添加包含此类影片的文件夹。"
+                        : "添加本地影片，建立属于你的私人资料库。先扫描本地，联网资料由你手动获取。"}
                 </p>
-                {query || Object.keys(filters).length || type ? (
-                  <button
-                    className="secondary"
-                    onClick={() => {
-                      setQuery("");
-                      setFilter({});
-                      setType("");
-                      setPage(0);
-                    }}
-                  >
+                {hasSearchCriteria || (type && !removed) ? (
+                  <button className="secondary" onClick={showAllFilms}>
                     查看全部影片
                   </button>
                 ) : removed ? (
-                  <button
-                    className="secondary"
-                    onClick={() => {
-                      setRemoved(false);
-                      setType("");
-                      setPage(0);
-                    }}
-                  >
+                  <button className="secondary" onClick={showAllFilms}>
                     返回影片库
                   </button>
                 ) : (
@@ -1539,21 +1608,25 @@ function App() {
               <span>
                 显示 {items.length} / {total} 部
               </span>
-              <div className="row">
+              <div className="row" role="navigation" aria-label="资料库分页">
                 <button
                   className="icon"
                   aria-label="上一页"
-                  disabled={page === 0}
-                  onClick={() => setPage(page - 1)}
+                  disabled={loading || page === 0}
+                  onClick={() => changePage(page - 1)}
                 >
                   <ChevronLeft size={17} />
                 </button>
-                <span>{page + 1}</span>
+                <span aria-current="page">
+                  {loading
+                    ? `第 ${page + 1} 页`
+                    : `第 ${page + 1} / ${pageCount} 页`}
+                </span>
                 <button
                   className="icon"
                   aria-label="下一页"
-                  disabled={(page + 1) * 60 >= total}
-                  onClick={() => setPage(page + 1)}
+                  disabled={loading || page + 1 >= pageCount}
+                  onClick={() => changePage(page + 1)}
                 >
                   <ChevronRight size={17} />
                 </button>
