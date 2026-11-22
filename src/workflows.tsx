@@ -4,10 +4,10 @@ import { api } from "./api";
 import { Modal } from "./ui";
 import {
   Item,
+  Entity,
   Filters,
   Tag,
   Catalog,
-  mediaNames,
   minutes,
   subtitleNames,
   subtitleStatus,
@@ -20,6 +20,41 @@ export function SubtitleStatus({ item }: { item: Item }) {
       <Subtitles size={14} aria-hidden="true" />
       {subtitleNames[state]}
     </span>
+  );
+}
+export function CardTags({
+  ids,
+  tags,
+}: {
+  ids: string[];
+  tags: ReadonlyMap<string, Tag>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const labels = ids
+    .map((id) => tags.get(id))
+    .filter((tag) => tag !== undefined);
+  if (!labels.length) return null;
+  return (
+    <div className="card-tags" role="group" aria-label="影片标签">
+      {(expanded ? labels : labels.slice(0, 2)).map((tag) => (
+        <span className="tiny-tag" key={tag.id}>
+          {tag.name}
+        </span>
+      ))}
+      {labels.length > 2 && (
+        <button
+          type="button"
+          className="more-tags"
+          aria-expanded={expanded}
+          aria-label={
+            expanded ? "收起其余标签" : `显示其余 ${labels.length - 2} 个标签`
+          }
+          onClick={() => setExpanded(!expanded)}
+        >
+          {expanded ? "收起" : `+${labels.length - 2}`}
+        </button>
+      )}
+    </div>
   );
 }
 export function FilterSummary({
@@ -92,11 +127,17 @@ export function FilterSummary({
 }
 export function FilmDetails({
   item,
+  actors,
+  browseActor,
+  category,
   close,
   edit,
   play,
 }: {
   item: Item;
+  actors: Entity[];
+  browseActor: (id: string) => void;
+  category?: string;
   close: () => void;
   edit: () => void;
   play: () => void;
@@ -104,11 +145,32 @@ export function FilmDetails({
   return (
     <Modal title={item.title} close={close}>
       <p>
-        {mediaNames[item.mediaType]} · {minutes(item.duration)} ·{" "}
+        {category && category + " · "}
+        {minutes(item.duration)} ·{" "}
         {item.rating ? item.rating + " 星" : "未评分"}
       </p>
       <SubtitleStatus item={item} />
-      <p>{item.performers?.join("、") || "未填写演员"}</p>
+      {item.performers?.length ? (
+        <div className="row wrap" aria-label="演员">
+          {item.performers.map((name) => {
+            const actor = actors.find((value) => value.name === name);
+            return actor ? (
+              <button
+                key={name}
+                className="tag"
+                onClick={() => browseActor(actor.id)}
+              >
+                {name}
+              </button>
+            ) : (
+              <span key={name}>{name}</span>
+            );
+          })}
+        </div>
+      ) : (
+        <p>未填写演员</p>
+      )}
+      {item.studio && <p>{item.studio}</p>}
       <p>{item.description || "暂无简介"}</p>
       <p>{item.note || "暂无笔记"}</p>
       <p className="path muted">{item.path}</p>

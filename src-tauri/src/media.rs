@@ -172,14 +172,26 @@ pub fn output(mut command: Command, s: &AppState, job: Option<&str>) -> Result<V
     result
 }
 pub(super) fn enqueue(c: &Connection, ids: &[String], automatic: bool) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let mut item_query = c.prepare_cached(
+        "SELECT path,revision FROM items i WHERE id=?1 AND removed=0 AND available=1
+         AND (?2=0 OR NOT EXISTS(SELECT 1 FROM jobs WHERE item_id=i.id AND kind='local'
+           AND state IN('queued','running','paused')))"
+    ).map_err(err)?;
+    let mut lookup_history = c.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM jobs WHERE item_id=?1 AND kind='local' AND query=?2
+         AND state IN('saved','failed','cancelled'))"
+    ).map_err(err)?;
+    let mut insert_job = c.prepare_cached(
+        "INSERT OR IGNORE INTO jobs(id,item_id,kind,state,query,revision,created_at,updated_at)
+         VALUES(?1,?2,'local','queued',?3,?4,?5,?5)"
+    ).map_err(err)?;
     let mut count = 0;
     for item in ids {
-        let row: Option<(String, i64)> = c
-            .query_row(
-                "SELECT path,revision FROM items WHERE id=?1 AND removed=0 AND available=1",
-                [item],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
+        let row: Option<(String, i64)> = item_query
+            .query_row(params![item, automatic], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()
             .map_err(err)?;
         let Some((path, revision)) = row else {
@@ -189,12 +201,12 @@ pub(super) fn enqueue(c: &Connection, ids: &[String], automatic: bool) -> Result
             continue;
         };
         if automatic {
-            let done:bool=c.query_row("SELECT EXISTS(SELECT 1 FROM jobs WHERE item_id=?1 AND kind='local' AND query=?2 AND state IN('saved','failed','cancelled'))",params![item,version],|r|r.get(0)).map_err(err)?;
+            let done: bool = lookup_history.query_row(params![item,version], |r| r.get(0)).map_err(err)?;
             if done {
                 continue;
             }
         }
-        count+=c.execute("INSERT OR IGNORE INTO jobs(id,item_id,kind,state,query,revision,created_at,updated_at) VALUES(?1,?2,'local','queued',?3,?4,?5,?5)",params![id(),item,version,revision,stamp()]).map_err(err)?;
+        count += insert_job.execute(params![id(), item, version, revision, stamp()]).map_err(err)?;
     }
     Ok(count)
 }

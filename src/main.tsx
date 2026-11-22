@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useEffect, useState, useRef, useMemo } from "react";
 import { createRoot } from "react-dom/client";
 import { createPortal } from "react-dom";
 import { open, save } from "@tauri-apps/plugin-dialog";
@@ -26,7 +26,6 @@ import {
   ChevronRight,
   ListTodo,
   AlertCircle,
-  Users,
   Download,
   Minus,
   Square,
@@ -39,6 +38,7 @@ import {
   libraryApi,
   traceDiagnostic,
   type JobScope,
+  type SearchSuggestion,
 } from "./api";
 import {
   JOB_PAGE_SIZE,
@@ -54,7 +54,7 @@ import {
   MediaType,
   mediaNames,
   bytes,
-  minutes,
+  playbackTime,
   Filters,
   normalizeFilters,
   Catalog,
@@ -66,9 +66,12 @@ import {
   FilmDetails,
   SelectionDialog,
   SubtitleStatus,
+  CardTags,
 } from "./workflows";
 import { CompactSelect } from "./compact-select";
+import { useAnchoredPopup } from "./anchored-popup";
 import { FilterPanel } from "./filter-panel";
+import { groupTags } from "./tag-groups";
 import "./style.css";
 import "./glass-theme.css";
 import "./soft-theme.css";
@@ -94,6 +97,14 @@ function readView() {
     return { size: 280, sort: "activity" };
   }
 }
+function matchesEntity(entity: Entity | Tag, query: string) {
+  const value = query.trim().toLocaleLowerCase();
+  return [
+    entity.name,
+    ...("aliases" in entity ? entity.aliases || [] : []),
+  ].some((name) => name.toLocaleLowerCase().includes(value));
+}
+
 function App() {
   const dialogs = useDialogs();
   const { askText, askConfirm } = dialogs;
@@ -117,6 +128,23 @@ function App() {
     groupId: string;
   } | null>(null);
   const [entityQuery, setEntityQuery] = useState("");
+  const entitySearch = useRef<HTMLInputElement>(null);
+  const entityEditTrigger = useRef<HTMLButtonElement | null>(null);
+  const [entityMenu, setEntityMenu] = useState("");
+  const entityMenuTrigger = useRef<HTMLButtonElement>(null);
+  const entityMenuPopup = useRef<HTMLDivElement>(null);
+  useAnchoredPopup(entityMenu, entityMenuTrigger, entityMenuPopup, "end");
+  const [managementReturn, setManagementReturn] = useState<{
+    tab: "tags" | "categories";
+    id: string;
+    scrollTop: number;
+  } | null>(null);
+  const restoreManagement = useRef<typeof managementReturn>(null);
+  const [tagGroup, setTagGroup] = useState("");
+  const [unusedTagsOnly, setUnusedTagsOnly] = useState(false);
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [mergeSource, setMergeSource] = useState<Entity | Tag | null>(null);
+  const [mergeQuery, setMergeQuery] = useState("");
 
   const [query, setQuery] = useState(""),
     [type, setType] = useState(""),
@@ -133,7 +161,7 @@ function App() {
     [selected, setSelected] = useState<string[]>([]),
     [suggestionResults, setSuggestionResults] = useState<{
       query: string;
-      items: Item[];
+      items: SearchSuggestion[];
     }>(),
     [focus, setFocus] = useState(false),
     [previous, setPrevious] = useState<{
@@ -149,8 +177,10 @@ function App() {
     }),
     [rootDraft, setRootDraft] = useState({
       path: "",
-      mediaType: "jav",
+      mediaType: "personal",
       kind: "video",
+      categoryId: "",
+      newCategory: "",
     }),
     [batchTags, setBatchTags] = useState<string[]>([]),
     [entityTab, setEntityTab] = useState("tags"),
@@ -204,11 +234,11 @@ function App() {
   } = useLibraryData(
     {
       query: searchQuery,
-      mediaType: type,
+      mediaType: "",
       removed,
       offset: page * PAGE_SIZE,
       limit: PAGE_SIZE,
-      filters: { ...filters, sort },
+      filters: { ...filters, sort, ...(type ? { categoryId: type } : {}) },
     },
     composingSearch || query === searchQuery,
     panel === "jobs",
@@ -221,9 +251,60 @@ function App() {
     suggestionResults?.query === query ? suggestionResults.items : [];
   const showSuggestions = focus && !composingSearch && suggestions.length > 0;
   const pageCount = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  const categories = catalog.categories ?? [];
+  const categoryName = categories.find(
+    (category) => category.id === type,
+  )?.name;
+  const pinnedTags = useMemo(() => tags.filter((tag) => tag.pinned), [tags]);
+  const managedEntities =
+    entityTab === "tags" ? tags : catalog[entityTab as keyof Catalog] || [];
+  const visibleEntities =
+    panel === "tags" || panel === "entities"
+      ? managedEntities.filter(
+          (entity) =>
+            (entityTab === "tags" && entityDraft?.id === entity.id) ||
+            (matchesEntity(entity, entityQuery) &&
+              (entityTab !== "tags" ||
+                ((!tagGroup ||
+                  ("groupId" in entity &&
+                    (entity.groupId ?? "__none") === tagGroup)) &&
+                  (!unusedTagsOnly ||
+                    ("totalUsageCount" in entity &&
+                      entity.totalUsageCount === 0))))),
+        )
+      : [];
+  const singleSelectedTag =
+    selectedTags.length === 1
+      ? tags.find((tag) => tag.id === selectedTags[0])
+      : undefined;
+  const entitySections =
+    entityTab === "tags"
+      ? groupTags(visibleEntities, catalog.tag_groups)
+      : [{ id: entityTab, name: "", tags: visibleEntities }];
+  useEffect(() => {
+    const state = restoreManagement.current;
+    if (!state || panel !== (state.tab === "tags" ? "tags" : "entities"))
+      return;
+    const frame = requestAnimationFrame(() => {
+      restoreManagement.current = null;
+      const dialog = entitySearch.current?.closest("[data-app-dialog]");
+      if (!dialog) return;
+      const link = Array.from(
+        dialog.querySelectorAll<HTMLButtonElement>("[data-browse-entity]"),
+      ).find((button) => button.dataset.browseEntity === state.id);
+      dialog.scrollTop = state.scrollTop;
+      link?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [panel]);
   const hasSearchCriteria = !!query.trim() || Object.keys(filters).length > 0;
-  const offlineRoots = new Set(
-    roots.filter((root) => !root.online).map((root) => root.id),
+  const offlineRoots = useMemo(
+    () => new Set(roots.filter((root) => !root.online).map((root) => root.id)),
+    [roots],
+  );
+  const tagsById = useMemo(
+    () => new Map(tags.map((tag) => [tag.id, tag])),
+    [tags],
   );
   useEffect(() => {
     if (composingSearch) return;
@@ -241,16 +322,9 @@ function App() {
     let live = true;
     const timer = setTimeout(() => {
       libraryApi
-        .list({
-          query,
-          mediaType: "",
-          removed: false,
-          offset: 0,
-          limit: 8,
-          filters: {},
-        })
-        .then((p) => {
-          if (live) setSuggestionResults({ query, items: p.items });
+        .suggestions(query)
+        .then((items) => {
+          if (live) setSuggestionResults({ query, items });
         })
         .catch(() => {});
     }, 150);
@@ -386,7 +460,13 @@ function App() {
       title: "选择媒体或字幕文件夹",
     });
     if (typeof path === "string") {
-      setRootDraft({ ...rootDraft, path });
+      setRootDraft({
+        path,
+        mediaType: "personal",
+        kind: "video",
+        categoryId: "",
+        newCategory: "",
+      });
       setPanel("add-root");
     }
   }
@@ -428,6 +508,7 @@ function App() {
     window.scrollTo(0, 0);
   }
   function showAllFilms() {
+    setManagementReturn(null);
     setQuery("");
     setSearchQuery("");
     setFilters({});
@@ -438,12 +519,18 @@ function App() {
     setFocus(false);
     changePage(0);
   }
+  function browseFilmsWith(criteria: Filters) {
+    setDetail(null);
+    setPanel("");
+    showAllFilms();
+    setFilter(criteria);
+  }
   function focusLocatedCard(id: string) {
     const card = document.getElementById("item-" + id);
     card?.focus({ preventScroll: true });
     card?.scrollIntoView({ block: "center" });
   }
-  function locate(item: Item) {
+  function locate(item: SearchSuggestion) {
     setFocus(false);
     if (items.some((i) => i.id === item.id)) {
       pendingLocation.current = null;
@@ -514,17 +601,20 @@ function App() {
     setPanel("files");
   }
   async function batch(change: any) {
-    await action("批量更新", () =>
-      api("batch_edit", {
-        change: {
-          ids: selected,
-          addTags: [],
-          removeTags: [],
-          mediaType: null,
-          favorite: null,
-          ...change,
-        },
-      }),
+    await action(
+      "批量更新",
+      () =>
+        api("batch_edit", {
+          change: {
+            ids: selected,
+            addTags: [],
+            removeTags: [],
+            mediaType: null,
+            favorite: null,
+            ...change,
+          },
+        }),
+      ["items", "catalog"],
     );
   }
   const setFilter = (value: Filters) => {
@@ -532,7 +622,7 @@ function App() {
     setPage(0);
   };
   async function closeEditor() {
-    if (busy) return;
+    if (busy) return false;
     if (
       editing &&
       (JSON.stringify(editing) !== editorBaseline.current ||
@@ -543,8 +633,9 @@ function App() {
         "放弃修改",
       ))
     )
-      return;
+      return false;
     setEditing(null);
+    return true;
   }
   async function closeSettings() {
     if (busy) return;
@@ -560,16 +651,9 @@ function App() {
     setResumePlayback(null);
     setPanel("");
   }
-  async function createEditorTag() {
+  async function createEditorTag(forBatch = false) {
     const name = tagName.trim();
-    if (!name || !editing) return;
-    const current = {
-      ...editing,
-      performers: actorText
-        .split("\n")
-        .map((v) => v.trim())
-        .filter(Boolean),
-    };
+    if (!name || (!forBatch && !editing)) return;
     await action(
       "创建并选中标签",
       async () => {
@@ -580,10 +664,18 @@ function App() {
           tag = { id: crypto.randomUUID(), name, groupId: null };
           await api("save_tag", { tag });
         }
-        setEditing({
-          ...current,
-          tags: Array.from(new Set([...current.tags, tag.id])),
-        });
+        const tagId = tag.id;
+        if (forBatch) {
+          setBatchTags((current) => Array.from(new Set([...current, tagId])));
+        } else {
+          setEditing(
+            (current) =>
+              current && {
+                ...current,
+                tags: Array.from(new Set([...current.tags, tagId])),
+              },
+          );
+        }
         setTagName("");
       },
       ["catalog"],
@@ -648,6 +740,32 @@ function App() {
     entityBaseline.current = JSON.stringify(value);
     setEntityDraft(value);
   }
+  function finishEntityEdit() {
+    setEntityDraft(null);
+    if (entityEditTrigger.current?.isConnected)
+      entityEditTrigger.current.focus();
+    else entitySearch.current?.focus();
+  }
+  function resetEntityList(tab: string) {
+    setEntityMenu("");
+    setEntityTab(tab);
+    setEntityQuery("");
+    setTagGroup("");
+    setUnusedTagsOnly(false);
+    setSelectedTags([]);
+    setMergeSource(null);
+  }
+  function openManagement(tab: string) {
+    setManagementReturn(null);
+    resetEntityList(tab);
+    setPanel(tab === "tags" ? "tags" : "entities");
+    void refresh("catalog").catch((error) => setToast(String(error)));
+  }
+  function openMerge(entity: Entity | Tag) {
+    setEntityDraft(null);
+    setMergeQuery("");
+    setMergeSource(entity);
+  }
   async function discardEntityDraft() {
     return (
       !entityDraft ||
@@ -662,8 +780,126 @@ function App() {
   async function closeEntities() {
     if (await discardEntityDraft()) {
       setEntityDraft(null);
+      setEntityMenu("");
       setPanel("");
     }
+  }
+  function renderEntityForm() {
+    return (
+      entityDraft && (
+        <form
+          className="entity-form"
+          onSubmit={async (e) => {
+            e.preventDefault();
+            const draft = entityDraft;
+            const ok = await action(
+              "保存管理项目",
+              () =>
+                entityTab === "tags"
+                  ? api("save_tag", {
+                      tag: {
+                        id: draft.id,
+                        name: draft.name.trim(),
+                        groupId: draft.groupId || null,
+                      },
+                    })
+                  : entityTab === "categories"
+                    ? api("save_category", {
+                        key: draft.id,
+                        name: draft.name.trim(),
+                      })
+                    : api("save_entity", {
+                        table: entityTab,
+                        key: draft.id,
+                        name: draft.name.trim(),
+                        aliases: draft.aliases
+                          .split(/[,，\n]/)
+                          .map((v) => v.trim())
+                          .filter(Boolean),
+                      }),
+              ["catalog", "items"],
+            );
+            if (ok) {
+              if (
+                entityTab === "tags" &&
+                (!matchesEntity(
+                  { id: draft.id, name: draft.name },
+                  entityQuery,
+                ) ||
+                  (tagGroup && tagGroup !== (draft.groupId || "__none")))
+              ) {
+                setEntityQuery("");
+                setTagGroup("");
+              }
+              finishEntityEdit();
+            }
+          }}
+        >
+          <label>
+            名称
+            <input
+              autoFocus
+              required
+              maxLength={80}
+              value={entityDraft.name}
+              onChange={(e) =>
+                setEntityDraft({ ...entityDraft, name: e.target.value })
+              }
+            />
+          </label>
+          {entityTab === "tags" && (
+            <div className="entity-group-field">
+              <span>标签分组</span>
+              <CompactSelect
+                label="标签分组"
+                value={entityDraft.groupId}
+                onChange={(groupId) =>
+                  setEntityDraft({
+                    ...entityDraft,
+                    groupId,
+                  })
+                }
+                options={[
+                  { value: "", label: "未分组" },
+                  ...catalog.tag_groups.map(({ id, name }) => ({
+                    value: id,
+                    label: name,
+                  })),
+                ]}
+              />
+            </div>
+          )}
+          {entityTab === "performers" && (
+            <label>
+              别名（用逗号分隔）
+              <input
+                value={entityDraft.aliases}
+                onChange={(e) =>
+                  setEntityDraft({
+                    ...entityDraft,
+                    aliases: e.target.value,
+                  })
+                }
+              />
+            </label>
+          )}
+          <div className="dialog-footer">
+            <button
+              type="button"
+              className="secondary"
+              onClick={async () => {
+                if (await discardEntityDraft()) finishEntityEdit();
+              }}
+            >
+              取消编辑
+            </button>
+            <button className="primary" disabled={!entityDraft.name.trim()}>
+              保存{entityTab === "tags" ? "标签" : "项目"}
+            </button>
+          </div>
+        </form>
+      )
+    );
   }
   const exitCheck = useRef<() => Promise<boolean>>(async () => true);
   const exitPending = useRef(false);
@@ -828,21 +1064,31 @@ function App() {
               <Library size={18} />
               全部影片
             </button>
-            {Object.entries(mediaNames).map(([k, v]) => (
-              <button
-                className={type === k && !removed ? "active" : ""}
-                aria-current={type === k && !removed ? "page" : undefined}
-                key={k}
-                onClick={() => {
-                  setType(k);
-                  setRemoved(false);
-                  setPage(0);
-                }}
+            {categories.length > 0 && (
+              <div
+                className="category-nav"
+                role="group"
+                aria-label="按分类浏览"
               >
-                <Film size={18} />
-                {v}
-              </button>
-            ))}
+                {categories.map(({ id, name }) => (
+                  <button
+                    className={type === id && !removed ? "active" : ""}
+                    aria-current={type === id && !removed ? "page" : undefined}
+                    key={id}
+                    onClick={() => {
+                      setType(id);
+                      setRemoved(false);
+                      setPage(0);
+                    }}
+                  >
+                    <Film size={18} />
+                    <span className="category-name" title={name}>
+                      {name}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
             <button
               className={filters.favorite ? "active" : ""}
               aria-pressed={!!filters.favorite}
@@ -865,68 +1111,43 @@ function App() {
               已移出项目
             </button>
           </nav>
-          <div className="section-label row">
-            个人标签
-            <button
-              aria-label="管理标签"
-              className="icon"
-              onClick={() => {
-                setEntityTab("tags");
-                setPanel("tag-management");
-              }}
-            >
-              <Tags size={14} />
-              管理
+          <nav aria-label="标签">
+            <button onClick={() => openManagement("tags")}>
+              <Tags size={17} />
+              标签管理
             </button>
-          </div>
-          <div className="tag-list">
-            {!tags.length && (
-              <button
-                className="tag"
-                onClick={() => {
-                  setEntityTab("tags");
-                  setPanel("tag-management");
-                  openEntityDraft({
-                    id: crypto.randomUUID(),
-                    name: "",
-                    aliases: "",
-                    groupId: "",
-                  });
-                }}
-              >
-                ＋ 创建第一个标签
-              </button>
-            )}
-            {tags.slice(0, 15).map((t) => (
-              <button
-                className={
-                  "tag " + (filters.tags?.includes(t.id) ? "picked" : "")
-                }
-                key={t.id}
-                aria-pressed={!!filters.tags?.includes(t.id)}
-                onClick={() =>
-                  setFilter({
-                    ...filters,
-                    tags: filters.tags?.includes(t.id)
-                      ? filters.tags.filter((i) => i !== t.id)
-                      : [...(filters.tags || []), t.id],
-                  })
-                }
-              >
-                {t.name}
-              </button>
-            ))}
-          </div>
-          <div className="section-label management-label">管理</div>
+          </nav>
+          {pinnedTags.length > 0 && (
+            <>
+              <div className="section-label">常用标签</div>
+              <div className="tag-list">
+                {pinnedTags.map((t) => (
+                  <button
+                    className={
+                      "tag " + (filters.tags?.includes(t.id) ? "picked" : "")
+                    }
+                    key={t.id}
+                    aria-pressed={!!filters.tags?.includes(t.id)}
+                    onClick={() =>
+                      setFilter({
+                        ...filters,
+                        tags: filters.tags?.includes(t.id)
+                          ? filters.tags.filter((i) => i !== t.id)
+                          : [...(filters.tags || []), t.id],
+                      })
+                    }
+                  >
+                    {t.name}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
           <nav className="sidebar-bottom" aria-label="资料与系统管理">
-            <button
-              onClick={() => {
-                setEntityTab("performers");
-                setPanel("entities");
-              }}
-            >
-              <Users size={17} />
-              演员与厂商
+            <div className="section-label management-label">管理</div>
+            <button onClick={() => openManagement("categories")}>
+              <Library size={17} />
+              分类管理
             </button>
             <button onClick={() => setPanel("roots")}>
               <HardDrive size={17} />
@@ -965,13 +1186,6 @@ function App() {
         </aside>
         <main>
           <header className="library-header">
-            <h1 ref={libraryTitle} tabIndex={-1}>
-              {removed
-                ? "已移出项目"
-                : type
-                  ? mediaNames[type as MediaType]
-                  : "影片资料库"}
-            </h1>
             <div
               className="search-wrap"
               onBlur={(e) => {
@@ -1068,11 +1282,53 @@ function App() {
                       <Film size={18} />
                       <span>
                         {i.title}
-                        <small>{i.code || mediaNames[i.mediaType]}</small>
+                        {i.code && <small>{i.code}</small>}
                       </span>
                     </button>
                   ))}
                 </div>
+              )}
+            </div>
+            <div className="row toolbar-actions">
+              <button
+                className="filter-chip"
+                onClick={() => {
+                  setMulti(!multi);
+                  setSelected([]);
+                }}
+              >
+                <CheckSquare size={15} />
+                {multi ? "退出多选" : "批量管理"}
+              </button>
+              <button
+                ref={filterButton}
+                className={"filter-chip" + (filterOpen ? " filter-active" : "")}
+                aria-label="筛选影片"
+                aria-expanded={filterOpen}
+                aria-controls="library-filter-panel"
+                onClick={() => {
+                  if (filterOpen) {
+                    setFilterOpen(false);
+                    setFilterError("");
+                  } else {
+                    setFilterDraft(structuredClone(filters));
+                    filterOrigin.current = JSON.stringify(filters);
+                    setFilterError("");
+                    setFilterOpen(true);
+                  }
+                }}
+              >
+                <SlidersHorizontal size={15} /> 筛选
+                {Object.keys(filters).length > 0 ? " · 已应用" : ""}
+              </button>
+              {Object.keys(filters).length > 0 && (
+                <button
+                  className="icon"
+                  aria-label="清除筛选"
+                  onClick={() => setFilter({})}
+                >
+                  <X size={16} />
+                </button>
               )}
             </div>
             <button className="primary" onClick={addRoot}>
@@ -1113,51 +1369,24 @@ function App() {
                 </button>
               </div>
             )}
-            <div className="toolbar">
-              <div className="row toolbar-actions">
-                <button
-                  className="filter-chip"
-                  onClick={() => {
-                    setMulti(!multi);
-                    setSelected([]);
-                  }}
+            <div className="toolbar library-view-toolbar">
+              <div className="library-heading-row">
+                <h1
+                  className="library-heading"
+                  ref={libraryTitle}
+                  tabIndex={-1}
                 >
-                  <CheckSquare size={15} />
-                  {multi ? "退出多选" : "批量管理"}
-                </button>
-                <button
-                  ref={filterButton}
-                  className={
-                    "filter-chip" + (filterOpen ? " filter-active" : "")
-                  }
-                  aria-label="筛选影片"
-                  aria-expanded={filterOpen}
-                  aria-controls="library-filter-panel"
-                  onClick={() => {
-                    if (filterOpen) {
-                      setFilterOpen(false);
-                      setFilterError("");
-                    } else {
-                      setFilterDraft(structuredClone(filters));
-                      filterOrigin.current = JSON.stringify(filters);
-                      setFilterError("");
-                      setFilterOpen(true);
-                    }
-                  }}
-                >
-                  <SlidersHorizontal size={15} /> 筛选
-                  {Object.keys(filters).length > 0 ? " · 已应用" : ""}
-                </button>
-                {Object.keys(filters).length > 0 && (
-                  <button
-                    className="icon"
-                    aria-label="清除筛选"
-                    onClick={() => setFilter({})}
-                  >
-                    <X size={16} />
-                  </button>
-                )}
+                  {removed ? "已移出项目" : categoryName || "全部影片"}
+                </h1>
+                <span className="library-count" role="status">
+                  {loading
+                    ? "正在读取资料…"
+                    : loadError && !items.length
+                      ? ""
+                      : `${total} 部影片`}
+                </span>
               </div>
+
               <div className="row">
                 <div className="view-control">
                   <span>排序</span>
@@ -1177,17 +1406,25 @@ function App() {
                     ]}
                   />
                 </div>
-                <div className="view-control">
-                  <span>卡片大小</span>
-                  <CompactSelect
-                    label="卡片大小"
-                    value={String(size)}
-                    onChange={(value) => setSize(Number(value))}
-                    options={[
-                      { value: "230", label: "小" },
-                      { value: "280", label: "中" },
-                    ]}
-                  />
+                <div
+                  className="card-density"
+                  role="group"
+                  aria-label="卡片大小"
+                >
+                  <button
+                    type="button"
+                    aria-pressed={size === 280}
+                    onClick={() => setSize(280)}
+                  >
+                    中
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={size === 230}
+                    onClick={() => setSize(230)}
+                  >
+                    小
+                  </button>
                 </div>
                 <button
                   className="secondary"
@@ -1330,6 +1567,7 @@ function App() {
                   disabled={!selected.length}
                   onClick={() => {
                     setBatchTags([]);
+                    setTagName("");
                     setBatchType("");
                     setPanel("batch");
                   }}
@@ -1380,13 +1618,20 @@ function App() {
               </div>
             )}
             <div className="library-results">
-              <p role="status">
-                {loading
-                  ? "正在读取资料…"
-                  : loadError && !items.length
-                    ? ""
-                    : `${total} 部影片`}
-              </p>
+              {managementReturn && (
+                <button
+                  className="secondary return-management"
+                  onClick={() => {
+                    restoreManagement.current = managementReturn;
+                    setPanel(
+                      managementReturn.tab === "tags" ? "tags" : "entities",
+                    );
+                    setManagementReturn(null);
+                  }}
+                >
+                  返回{managementReturn.tab === "tags" ? "标签" : "分类"}管理
+                </button>
+              )}
               <FilterSummary
                 filters={filters}
                 tags={tags}
@@ -1406,10 +1651,7 @@ function App() {
             {items.length ? (
               <div
                 className="grid"
-                style={{
-                  gridTemplateColumns:
-                    "repeat(auto-fill,minmax(" + size + "px,1fr))",
-                }}
+                data-density={size === 230 ? "small" : "medium"}
               >
                 {items.map((item) => (
                   <article
@@ -1431,8 +1673,17 @@ function App() {
                         label={item.code}
                         type={item.mediaType}
                       />
-                      <span className="media-badge">
-                        {mediaNames[item.mediaType]}
+                      {item.categoryId && (
+                        <span className="media-badge">
+                          {
+                            categories.find(
+                              (category) => category.id === item.categoryId,
+                            )?.name
+                          }
+                        </span>
+                      )}
+                      <span className="card-runtime">
+                        {playbackTime(item.duration)}
                       </span>
                       <button
                         type="button"
@@ -1504,19 +1755,22 @@ function App() {
                       <div className="meta-line">
                         <span>{item.code || "本地影片"}</span>
                         <span>
-                          {minutes(item.duration)} · {bytes(item.size)}
+                          {typeof item.size === "number" &&
+                          Number.isFinite(item.size)
+                            ? bytes(item.size)
+                            : "大小未知"}
+                        </span>
+                        <span>
+                          {item.width && item.height
+                            ? `${item.width}×${item.height}`
+                            : "分辨率未知"}
                         </span>
                       </div>
-                      <div
-                        className="people-line"
-                        title={[...(item.performers || []), item.studio]
-                          .filter(Boolean)
-                          .join(" · ")}
-                      >
-                        {item.performers?.join(" / ") ||
-                          item.studio ||
-                          "资料待补充"}
-                      </div>
+                      {!!item.performers?.length && (
+                        <div className="people-line">
+                          {item.performers.join(" / ")}
+                        </div>
+                      )}
                       <div className="stars">
                         {[1, 2, 3, 4, 5].map((n) => (
                           <button
@@ -1553,12 +1807,8 @@ function App() {
                             离线 · 核查
                           </button>
                         )}
-                        {item.tags.slice(0, 2).map((t) => (
-                          <span className="tiny-tag" key={t}>
-                            {tags.find((v) => v.id === t)?.name}
-                          </span>
-                        ))}
                       </div>
+                      <CardTags ids={item.tags} tags={tagsById} />
                     </div>
                   </article>
                 ))}
@@ -1575,8 +1825,8 @@ function App() {
                       : "暂无移出项目"
                     : hasSearchCriteria
                       ? "没有找到匹配影片"
-                      : type
-                        ? "暂无" + mediaNames[type as MediaType]
+                      : categoryName
+                        ? "暂无" + categoryName
                         : "从一个文件夹开始"}
                 </h2>
                 <p>
@@ -1660,6 +1910,12 @@ function App() {
         {detail && (
           <FilmDetails
             item={detail}
+            actors={catalog.performers}
+            browseActor={(id) => browseFilmsWith({ performers: [id] })}
+            category={
+              categories.find((category) => category.id === detail.categoryId)
+                ?.name
+            }
             close={() => setDetail(null)}
             play={() => {
               void play(detail);
@@ -1735,7 +1991,23 @@ function App() {
               />
             </label>
             <label>
-              媒体类型
+              分类
+              <select
+                value={editing.categoryId ?? ""}
+                onChange={(e) =>
+                  setEditing({ ...editing, categoryId: e.target.value })
+                }
+              >
+                <option value="">未分类</option>
+                {categories.map(({ id, name }) => (
+                  <option key={id} value={id}>
+                    {name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              资料来源
               <select
                 value={editing.mediaType}
                 onChange={(e) =>
@@ -1760,6 +2032,13 @@ function App() {
                 onChange={(e) => setActorText(e.target.value)}
               />
             </label>
+            <button
+              type="button"
+              className="secondary actor-management"
+              onClick={() => openManagement("performers")}
+            >
+              管理演员资料
+            </button>
             <label>
               厂商
               <input
@@ -1803,7 +2082,13 @@ function App() {
             </label>
             <label>个人标签</label>
             <ToggleList
-              values={tags}
+              values={tags.filter(
+                (tag) =>
+                  editing.tags.includes(tag.id) ||
+                  tag.name
+                    .toLocaleLowerCase()
+                    .includes(tagName.trim().toLocaleLowerCase()),
+              )}
               selected={editing.tags}
               change={(v) => setEditing({ ...editing, tags: v })}
             />
@@ -1822,7 +2107,7 @@ function App() {
               </label>
               <input
                 id="new-film-tag"
-                placeholder="输入新标签名称"
+                placeholder="搜索或创建标签"
                 value={tagName}
                 onChange={(e) => setTagName(e.target.value)}
                 maxLength={80}
@@ -1975,7 +2260,7 @@ function App() {
                   获取 / 刷新资料
                 </button>
                 {editing.mediaType === "personal" && (
-                  <p className="muted">个人片段使用手动资料，不联网匹配。</p>
+                  <p className="muted">此影片设为仅本地整理。</p>
                 )}
                 <button
                   onClick={() => editorOperation(() => fileOpen(editing))}
@@ -2102,24 +2387,63 @@ function App() {
               </select>
             </label>
             {rootDraft.kind === "video" && (
-              <label>
-                新入库视频的默认分类
-                <select
-                  value={rootDraft.mediaType}
-                  onChange={(e) =>
-                    setRootDraft({ ...rootDraft, mediaType: e.target.value })
-                  }
-                >
-                  {Object.entries(mediaNames).map(([k, v]) => (
-                    <option key={k} value={k}>
-                      {v}
-                    </option>
-                  ))}
-                </select>
-              </label>
+              <>
+                <label>
+                  新入库视频的默认分类
+                  <select
+                    value={rootDraft.categoryId}
+                    onChange={(e) =>
+                      setRootDraft({ ...rootDraft, categoryId: e.target.value })
+                    }
+                  >
+                    <option value="">未分类</option>
+                    {categories.map(({ id, name }) => (
+                      <option key={id} value={id}>
+                        {name}
+                      </option>
+                    ))}
+                    <option value="__new">新建分类…</option>
+                  </select>
+                </label>
+                {rootDraft.categoryId === "__new" && (
+                  <label>
+                    新分类名称
+                    <input
+                      maxLength={80}
+                      value={rootDraft.newCategory}
+                      onChange={(e) =>
+                        setRootDraft({
+                          ...rootDraft,
+                          newCategory: e.target.value,
+                        })
+                      }
+                    />
+                  </label>
+                )}
+                <label>
+                  资料来源
+                  <select
+                    value={rootDraft.mediaType}
+                    onChange={(e) =>
+                      setRootDraft({ ...rootDraft, mediaType: e.target.value })
+                    }
+                  >
+                    {Object.entries(mediaNames).map(([k, v]) => (
+                      <option key={k} value={k}>
+                        {v}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </>
             )}
             <button
               className="primary full"
+              disabled={
+                rootDraft.kind === "video" &&
+                rootDraft.categoryId === "__new" &&
+                !rootDraft.newCategory.trim()
+              }
               onClick={() =>
                 action(
                   "添加目录",
@@ -2128,10 +2452,15 @@ function App() {
                       path: rootDraft.path,
                       mediaType: rootDraft.mediaType,
                       kind: rootDraft.kind,
+                      ...(rootDraft.kind === "video" && rootDraft.categoryId
+                        ? rootDraft.categoryId === "__new"
+                          ? { newCategory: rootDraft.newCategory.trim() }
+                          : { categoryId: rootDraft.categoryId }
+                        : {}),
                     });
                     setPanel("roots");
                   },
-                  ["roots"],
+                  ["roots", "catalog"],
                 )
               }
             >
@@ -2153,7 +2482,9 @@ function App() {
                   <b>
                     {r.kind === "subtitle"
                       ? "字幕目录"
-                      : mediaNames[r.mediaType]}
+                      : categories.find(
+                          (category) => category.id === r.categoryId,
+                        )?.name || "未分类"}
                   </b>
                   <small className="path">{r.path}</small>
                   <small>
@@ -2167,27 +2498,51 @@ function App() {
                 </div>
                 <div className="row wrap">
                   {r.kind !== "subtitle" && (
-                    <select
-                      aria-label="目录默认类型"
-                      value={r.mediaType}
-                      onChange={(e) =>
-                        action(
-                          "修改目录默认类型",
-                          () =>
-                            api("set_root_type", {
-                              rootId: r.id,
-                              mediaType: e.target.value,
-                            }),
-                          ["roots"],
-                        )
-                      }
-                    >
-                      {Object.entries(mediaNames).map(([id, name]) => (
-                        <option key={id} value={id}>
-                          {name}
-                        </option>
-                      ))}
-                    </select>
+                    <>
+                      <select
+                        aria-label={"新入库默认分类 " + r.path}
+                        value={r.categoryId ?? ""}
+                        onChange={(e) =>
+                          action(
+                            "修改目录默认分类",
+                            () =>
+                              api("set_root_category", {
+                                rootId: r.id,
+                                categoryId: e.target.value || null,
+                              }),
+                            ["roots", "catalog"],
+                          )
+                        }
+                      >
+                        <option value="">未分类</option>
+                        {categories.map(({ id, name }) => (
+                          <option key={id} value={id}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
+                      <select
+                        aria-label={"新入库资料来源 " + r.path}
+                        value={r.mediaType}
+                        onChange={(e) =>
+                          action(
+                            "修改新入库资料来源",
+                            () =>
+                              api("set_root_type", {
+                                rootId: r.id,
+                                mediaType: e.target.value,
+                              }),
+                            ["roots"],
+                          )
+                        }
+                      >
+                        {Object.entries(mediaNames).map(([id, name]) => (
+                          <option key={id} value={id}>
+                            {name}
+                          </option>
+                        ))}
+                      </select>
+                    </>
                   )}
                   <button
                     className="secondary"
@@ -2306,9 +2661,30 @@ function App() {
             title={"批量编辑 · " + selected.length + " 部"}
             close={() => setPanel("")}
           >
-            <label>标签</label>
+            <label>
+              搜索或创建标签
+              <input
+                value={tagName}
+                onChange={(e) => setTagName(e.target.value)}
+                maxLength={80}
+              />
+            </label>
+            {tagName.trim() && (
+              <button
+                className="secondary"
+                onClick={() => void createEditorTag(true)}
+              >
+                创建并选中
+              </button>
+            )}
             <ToggleList
-              values={tags}
+              values={tags.filter(
+                (tag) =>
+                  batchTags.includes(tag.id) ||
+                  tag.name
+                    .toLocaleLowerCase()
+                    .includes(tagName.trim().toLocaleLowerCase()),
+              )}
               selected={batchTags}
               change={setBatchTags}
             />
@@ -2334,10 +2710,11 @@ function App() {
                 value={batchType}
                 onChange={(e) => setBatchType(e.target.value)}
               >
-                <option value="">选择媒体类型</option>
-                {Object.entries(mediaNames).map(([k, v]) => (
-                  <option key={k} value={k}>
-                    {v}
+                <option value="">选择分类</option>
+                <option value="__none">未分类</option>
+                {categories.map(({ id, name }) => (
+                  <option key={id} value={id}>
+                    {name}
                   </option>
                 ))}
               </select>
@@ -2345,7 +2722,9 @@ function App() {
             <button
               className="secondary full"
               disabled={!batchType || !selected.length}
-              onClick={() => batch({ mediaType: batchType })}
+              onClick={() =>
+                batch({ categoryId: batchType === "__none" ? "" : batchType })
+              }
             >
               应用分类到所选 {selected.length} 部
             </button>
@@ -2375,653 +2754,992 @@ function App() {
             </button>
           </Modal>
         )}
-        {(panel === "entities" || panel === "tag-management") && (
+        {(panel === "entities" || panel === "tags") && (
           <Modal
-            title={panel === "tag-management" ? "标签管理" : "演员与厂商"}
+            title={
+              panel === "tags"
+                ? "标签管理"
+                : entityTab === "performers"
+                  ? "演员资料管理"
+                  : "分类管理"
+            }
             close={closeEntities}
             wide
           >
-            <div className="row tabs wrap">
-              {(panel === "tag-management"
-                ? [
-                    ["tags", "标签"],
-                    ["tag_groups", "标签分类"],
-                  ]
-                : [
-                    ["performers", "演员"],
-                    ["studios", "厂商"],
-                  ]
-              ).map(([id, name]) => (
-                <button
-                  key={id}
-                  aria-pressed={entityTab === id}
-                  className={entityTab === id ? "tag picked" : "tag"}
-                  onClick={async () => {
-                    if (await discardEntityDraft()) {
-                      setEntityTab(id);
-                      setEntityDraft(null);
-                      setEntityQuery("");
-                    }
-                  }}
-                >
-                  {name}
-                </button>
-              ))}
-            </div>
-            <p className="muted">
-              {panel === "tag-management"
-                ? "在这里新增、修改和整理个人标签，也可以在编辑影片时创建并选中标签。"
-                : "在这里管理演员、厂商及其别名。个人标签请在左侧“个人标签”旁点击“管理”。"}
-            </p>
+            {panel === "tags" && (
+              <div className="row tabs wrap">
+                {[
+                  ["tags", "全部标签"],
+                  ["tag_groups", "分组管理"],
+                ].map(([id, name]) => (
+                  <button
+                    key={id}
+                    aria-pressed={entityTab === id}
+                    className={entityTab === id ? "tag picked" : "tag"}
+                    onClick={async () => {
+                      if (await discardEntityDraft()) {
+                        resetEntityList(id);
+                        setEntityDraft(null);
+                      }
+                    }}
+                  >
+                    {name}
+                  </button>
+                ))}
+              </div>
+            )}
             <div className="row entity-toolbar">
               <input
-                aria-label="搜索管理项目"
-                placeholder="搜索名称"
+                ref={entitySearch}
+                aria-label={entityTab === "tags" ? "搜索标签" : "搜索管理项目"}
+                placeholder={
+                  entityTab === "performers"
+                    ? "搜索名称或别名"
+                    : entityTab === "tags"
+                      ? "搜索标签"
+                      : "搜索名称"
+                }
                 value={entityQuery}
                 onChange={(e) => setEntityQuery(e.target.value)}
               />
               <button
                 className="primary"
-                onClick={async () => {
-                  if (await discardEntityDraft())
+                onClick={async (event) => {
+                  const trigger = event.currentTarget;
+                  if (await discardEntityDraft()) {
+                    entityEditTrigger.current = trigger;
                     openEntityDraft({
                       id: crypto.randomUUID(),
                       name: "",
                       aliases: "",
-                      groupId: "",
+                      groupId:
+                        entityTab === "tags" && tagGroup !== "__none"
+                          ? tagGroup
+                          : "",
                     });
+                  }
                 }}
               >
                 新增
                 {entityTab === "tags"
                   ? "标签"
                   : entityTab === "tag_groups"
-                    ? "分类"
-                    : entityTab === "performers"
-                      ? "演员"
-                      : "厂商"}
+                    ? "分组"
+                    : entityTab === "categories"
+                      ? "分类"
+                      : "演员"}
               </button>
             </div>
-            {entityDraft && (
-              <form
-                className="entity-form"
-                onSubmit={async (e) => {
-                  e.preventDefault();
-                  const draft = entityDraft;
-                  const ok = await action(
-                    "保存管理项目",
-                    () =>
-                      entityTab === "tags"
-                        ? api("save_tag", {
-                            tag: {
-                              id: draft.id,
-                              name: draft.name.trim(),
-                              groupId: draft.groupId || null,
-                            },
-                          })
-                        : api("save_entity", {
-                            table: entityTab,
-                            key: draft.id,
-                            name: draft.name.trim(),
-                            aliases: draft.aliases
-                              .split(/[,，\n]/)
-                              .map((v) => v.trim())
-                              .filter(Boolean),
-                          }),
-                    ["catalog", "items"],
-                  );
-                  if (ok) setEntityDraft(null);
-                }}
-              >
-                <label>
-                  名称
+            {entityTab === "tags" && (
+              <div className="row wrap entity-filters">
+                <CompactSelect
+                  label="按标签分组筛选"
+                  value={tagGroup}
+                  onChange={setTagGroup}
+                  options={[
+                    { value: "", label: "全部分组" },
+                    { value: "__none", label: "未分组" },
+                    ...catalog.tag_groups.map(({ id, name }) => ({
+                      value: id,
+                      label: name,
+                    })),
+                  ]}
+                />
+                <label className="row">
                   <input
-                    autoFocus
-                    required
-                    maxLength={80}
-                    value={entityDraft.name}
-                    onChange={(e) =>
-                      setEntityDraft({ ...entityDraft, name: e.target.value })
-                    }
+                    type="checkbox"
+                    checked={unusedTagsOnly}
+                    onChange={(e) => setUnusedTagsOnly(e.target.checked)}
                   />
+                  仅未使用
                 </label>
-                {entityTab === "tags" && (
-                  <label>
-                    标签分类
-                    <select
-                      aria-label="标签分类"
-                      value={entityDraft.groupId}
-                      onChange={(e) =>
-                        setEntityDraft({
-                          ...entityDraft,
-                          groupId: e.target.value,
-                        })
+                <span className="muted" role="status">
+                  {visibleEntities.length} 个标签
+                </span>
+              </div>
+            )}
+            {entityTab === "tags" && selectedTags.length > 0 && (
+              <div className="row wrap entity-filters">
+                <span role="status">已选 {selectedTags.length} 个标签</span>
+                <button
+                  className="secondary"
+                  onClick={() => setSelectedTags([])}
+                >
+                  清空选择
+                </button>
+                <select
+                  aria-label="批量换组"
+                  value=""
+                  onChange={async (e) => {
+                    const group = e.target.value;
+                    if (!group) return;
+                    if (
+                      await action(
+                        "标签换组",
+                        () =>
+                          api("organize_tags", {
+                            tagIds: selectedTags,
+                            groupId: group === "__none" ? null : group,
+                            removeUnused: false,
+                          }),
+                        ["catalog"],
+                      )
+                    )
+                      setSelectedTags([]);
+                  }}
+                >
+                  <option value="">移动到分组…</option>
+                  <option value="__none">未分组</option>
+                  {catalog.tag_groups.map(({ id, name }) => (
+                    <option key={id} value={id}>
+                      {name}
+                    </option>
+                  ))}
+                </select>
+                <button
+                  className="secondary"
+                  disabled={
+                    !selectedTags.every(
+                      (id) =>
+                        tags.find((tag) => tag.id === id)?.totalUsageCount ===
+                        0,
+                    )
+                  }
+                  onClick={async () => {
+                    if (
+                      await askConfirm(
+                        `删除选中的 ${selectedTags.length} 个未使用标签？`,
+                        "清理标签",
+                        "确认删除",
+                      )
+                    ) {
+                      if (
+                        await action(
+                          "删除未使用标签",
+                          () =>
+                            api("organize_tags", {
+                              tagIds: selectedTags,
+                              groupId: null,
+                              removeUnused: true,
+                            }),
+                          ["catalog"],
+                        )
+                      )
+                        setSelectedTags([]);
+                    }
+                  }}
+                >
+                  删除未使用标签
+                </button>
+                {singleSelectedTag && (
+                  <>
+                    <button
+                      className="secondary"
+                      aria-pressed={!!singleSelectedTag.pinned}
+                      onClick={() =>
+                        action(
+                          "更新常用标签",
+                          () =>
+                            api("pin_tag", {
+                              tagId: singleSelectedTag.id,
+                              pinned: !singleSelectedTag.pinned,
+                            }),
+                          ["catalog"],
+                        )
                       }
                     >
-                      <option value="">未分组</option>
-                      {catalog.tag_groups.map((g) => (
-                        <option key={g.id} value={g.id}>
-                          {g.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
-                {["performers", "studios"].includes(entityTab) && (
-                  <label>
-                    别名（用逗号分隔）
-                    <input
-                      value={entityDraft.aliases}
-                      onChange={(e) =>
-                        setEntityDraft({
-                          ...entityDraft,
-                          aliases: e.target.value,
-                        })
-                      }
-                    />
-                  </label>
-                )}
-                <div className="dialog-footer">
-                  <button
-                    type="button"
-                    className="secondary"
-                    onClick={async () => {
-                      if (await discardEntityDraft()) setEntityDraft(null);
-                    }}
-                  >
-                    取消编辑
-                  </button>
-                  <button
-                    className="primary"
-                    disabled={!entityDraft.name.trim()}
-                  >
-                    保存{entityTab === "tags" ? "标签" : "项目"}
-                  </button>
-                </div>
-              </form>
-            )}
-            {(entityTab === "tags"
-              ? tags
-              : catalog[entityTab as keyof Catalog] || []
-            )
-              .filter((t) =>
-                t.name
-                  .toLocaleLowerCase()
-                  .includes(entityQuery.toLocaleLowerCase()),
-              )
-              .map((entity: Entity | Tag) => (
-                <div className="root-row" key={entity.id}>
-                  <div>
-                    <b>{entity.name}</b>
-                    {"aliases" in entity && (
-                      <small>{entity.aliases?.join(" / ")}</small>
-                    )}
-                    {"groupId" in entity && (
-                      <small>
-                        {catalog.tag_groups.find((g) => g.id === entity.groupId)
-                          ?.name || "未分组"}
-                      </small>
-                    )}
-                  </div>
-                  <div className="row wrap">
+                      {singleSelectedTag.pinned ? "取消固定" : "固定到侧栏"}
+                    </button>
                     <button
+                      className="secondary"
+                      disabled={tags.length < 2}
                       onClick={async () => {
                         if (await discardEntityDraft())
-                          openEntityDraft({
-                            id: entity.id,
-                            name: entity.name,
-                            aliases:
-                              "aliases" in entity
-                                ? (entity.aliases || []).join(",")
-                                : "",
-                            groupId:
-                              "groupId" in entity ? entity.groupId || "" : "",
-                          });
+                          openMerge(singleSelectedTag);
                       }}
                     >
-                      编辑
+                      合并到…
                     </button>
-                    {entityTab !== "tag_groups" && (
-                      <select
-                        aria-label={"合并 " + entity.name}
-                        value=""
-                        onChange={async (e) => {
-                          const target = e.target.value;
-                          const table = entityTab;
+                  </>
+                )}
+              </div>
+            )}
+            {(!entityDraft ||
+              entityTab !== "tags" ||
+              !tags.some((tag) => tag.id === entityDraft.id)) &&
+              renderEntityForm()}
+            {entitySections.map((section) => (
+              <section
+                key={section.id}
+                className={
+                  entityTab === "tags"
+                    ? "manage-tag-group"
+                    : entityTab === "categories"
+                      ? "manage-categories"
+                      : undefined
+                }
+              >
+                {section.name && (
+                  <h3>
+                    {section.name}
+                    <small>{section.tags.length} 个</small>
+                  </h3>
+                )}
+                <div
+                  className={
+                    entityTab === "tags"
+                      ? "manage-tag-chips"
+                      : entityTab === "categories"
+                        ? "manage-category-grid"
+                        : undefined
+                  }
+                >
+                  {section.tags.map((entity: Entity | Tag) => (
+                    <React.Fragment key={entity.id}>
+                      <div
+                        className="root-row entity-row"
+                        data-popup-open={entityMenu === entity.id || undefined}
+                        onKeyDown={(event) => {
                           if (
-                            target &&
-                            (await askConfirm(
-                              "将“" +
-                                entity.name +
-                                "”的关联并入所选项目，并删除原项目。将自动备份。",
-                              "合并资料",
-                              "确认合并",
-                            ))
+                            event.key !== "Escape" ||
+                            entityMenu !== entity.id
                           )
-                            await action(
-                              "合并资料",
-                              () =>
-                                api("merge_entity", {
-                                  table,
-                                  source: entity.id,
-                                  target,
-                                }),
-                              ["catalog", "items"],
-                            );
+                            return;
+                          event.preventDefault();
+                          event.stopPropagation();
+                          entityMenuTrigger.current?.focus();
+                          setEntityMenu("");
                         }}
                       >
-                        <option value="">合并到…</option>
-                        {(entityTab === "tags"
-                          ? tags
-                          : catalog[entityTab as keyof Catalog] || []
-                        )
-                          .filter((t) => t.id !== entity.id)
-                          .map((t) => (
-                            <option key={t.id} value={t.id}>
-                              {t.name}
-                            </option>
-                          ))}
-                      </select>
-                    )}
-                    <button
-                      aria-label={"删除 " + entity.name}
-                      onClick={async () => {
-                        const table = entityTab;
-                        if (
-                          await askConfirm(
-                            "删除“" +
-                              entity.name +
-                              "”及其关联？影片和视频文件会保留。",
-                            "删除管理项目",
-                            "确认删除",
-                          )
-                        )
-                          await action(
-                            "删除管理项目",
-                            () =>
-                              table === "tags"
-                                ? api("delete_tag", { tagId: entity.id })
-                                : api("delete_entity", {
-                                    table,
-                                    key: entity.id,
-                                  }),
-                            ["catalog", "items"],
-                          );
-                      }}
-                    >
-                      <Trash2 size={16} />
-                    </button>
-                  </div>
+                        {entityTab === "tags" && (
+                          <input
+                            type="checkbox"
+                            aria-label={"选择 " + entity.name}
+                            checked={selectedTags.includes(entity.id)}
+                            onChange={(e) =>
+                              setSelectedTags(
+                                e.target.checked
+                                  ? [...selectedTags, entity.id]
+                                  : selectedTags.filter(
+                                      (id) => id !== entity.id,
+                                    ),
+                              )
+                            }
+                          />
+                        )}
+                        <div>
+                          {entityTab === "categories" ||
+                          entityTab === "performers" ||
+                          ("groupId" in entity && entity.usageCount) ? (
+                            <button
+                              className="tag-film-link"
+                              data-browse-entity={entity.id}
+                              aria-label={
+                                "usageCount" in entity
+                                  ? `查看「${entity.name}」的 ${entity.usageCount} 部影片`
+                                  : `查看「${entity.name}」的影片`
+                              }
+                              onClick={async (event) => {
+                                const position =
+                                  event.currentTarget.closest(
+                                    "[data-app-dialog]",
+                                  )?.scrollTop || 0;
+                                if (!(await discardEntityDraft())) return;
+                                if (
+                                  entityTab === "performers" &&
+                                  editing &&
+                                  !(await closeEditor())
+                                )
+                                  return;
+                                setEntityDraft(null);
+                                setEntityMenu("");
+                                browseFilmsWith(
+                                  entityTab === "performers"
+                                    ? { performers: [entity.id] }
+                                    : entityTab === "tags"
+                                      ? { tags: [entity.id] }
+                                      : {},
+                                );
+                                if (entityTab === "categories")
+                                  setType(entity.id);
+                                if (
+                                  entityTab === "categories" ||
+                                  entityTab === "tags"
+                                )
+                                  setManagementReturn({
+                                    tab: entityTab,
+                                    id: entity.id,
+                                    scrollTop: position,
+                                  });
+                              }}
+                            >
+                              {entity.name}
+                            </button>
+                          ) : (
+                            <b>{entity.name}</b>
+                          )}
+                          {"aliases" in entity && (
+                            <small>{entity.aliases?.join(" / ")}</small>
+                          )}
+                          {"groupId" in entity && (
+                            <small>
+                              {entity.usageCount ?? 0} 部
+                              {entity.pinned && " · 已固定"}
+                            </small>
+                          )}
+                          {entityTab === "categories" &&
+                            "itemCount" in entity && (
+                              <small>
+                                {entity.itemCount} 部影片 · {entity.rootCount}{" "}
+                                个默认目录
+                              </small>
+                            )}
+                        </div>
+                        {(entityTab === "tags" ||
+                          entityTab === "categories") && (
+                          <button
+                            ref={
+                              entityMenu === entity.id
+                                ? entityMenuTrigger
+                                : undefined
+                            }
+                            type="button"
+                            className="entity-menu-button icon"
+                            data-entity-menu={entity.id}
+                            aria-label={"管理 " + entity.name}
+                            aria-expanded={entityMenu === entity.id}
+                            onClick={() =>
+                              setEntityMenu(
+                                entityMenu === entity.id ? "" : entity.id,
+                              )
+                            }
+                          >
+                            <MoreHorizontal size={17} />
+                          </button>
+                        )}
+                        <div
+                          ref={
+                            entityMenu === entity.id
+                              ? entityMenuPopup
+                              : undefined
+                          }
+                          className={
+                            entityTab === "tags" || entityTab === "categories"
+                              ? "entity-menu anchored-popup"
+                              : "row wrap"
+                          }
+                          hidden={
+                            (entityTab === "tags" ||
+                              entityTab === "categories") &&
+                            entityMenu !== entity.id
+                          }
+                          onBlur={(event) => {
+                            const trigger =
+                              event.currentTarget.previousElementSibling;
+                            if (
+                              entityMenu === entity.id &&
+                              event.relatedTarget !== trigger &&
+                              !event.currentTarget.contains(event.relatedTarget)
+                            )
+                              setEntityMenu("");
+                          }}
+                        >
+                          <button
+                            aria-label={
+                              entityTab === "tags" || entityTab === "categories"
+                                ? "编辑 " + entity.name
+                                : undefined
+                            }
+                            onClick={async (event) => {
+                              const trigger = event.currentTarget;
+                              if (await discardEntityDraft()) {
+                                entityEditTrigger.current =
+                                  (trigger.parentElement
+                                    ?.previousElementSibling as HTMLButtonElement | null) ||
+                                  trigger;
+                                setEntityMenu("");
+                                openEntityDraft({
+                                  id: entity.id,
+                                  name: entity.name,
+                                  aliases:
+                                    "aliases" in entity
+                                      ? (entity.aliases || []).join(",")
+                                      : "",
+                                  groupId:
+                                    "groupId" in entity
+                                      ? entity.groupId || ""
+                                      : "",
+                                });
+                              }
+                            }}
+                          >
+                            编辑
+                          </button>
+                          {entityTab === "performers" && (
+                            <button
+                              aria-label={"合并 " + entity.name}
+                              onClick={async () => {
+                                if (!(await discardEntityDraft())) return;
+                                openMerge(entity);
+                              }}
+                            >
+                              合并
+                            </button>
+                          )}
+                          <button
+                            aria-label={"删除 " + entity.name}
+                            onClick={async () => {
+                              const table = entityTab;
+                              if (
+                                await askConfirm(
+                                  table === "categories"
+                                    ? `删除分类「${entity.name}」？${"itemCount" in entity ? `${entity.itemCount} 部影片及 ${entity.rootCount} 个目录的默认分类会变为未分类。` : "分类中的影片及使用此默认分类的文件夹会变为未分类。"}`
+                                    : table === "tag_groups"
+                                      ? `删除分组「${entity.name}」？其中的标签会变为未分组。`
+                                      : "totalUsageCount" in entity
+                                        ? `删除标签「${entity.name}」？将解除 ${entity.totalUsageCount ?? 0} 部影片的标签关联，影片文件会保留。`
+                                        : `删除「${entity.name}」及其关联？影片文件会保留。`,
+                                  table === "tags"
+                                    ? "删除标签"
+                                    : "删除管理项目",
+                                  "确认删除",
+                                )
+                              )
+                                if (
+                                  await action(
+                                    "删除管理项目",
+                                    () =>
+                                      table === "tags"
+                                        ? api("delete_tag", {
+                                            tagId: entity.id,
+                                          })
+                                        : table === "categories"
+                                          ? api("delete_category", {
+                                              key: entity.id,
+                                            })
+                                          : api("delete_entity", {
+                                              table,
+                                              key: entity.id,
+                                            }),
+                                    table === "categories"
+                                      ? ["catalog", "items", "roots"]
+                                      : ["catalog", "items"],
+                                  )
+                                ) {
+                                  setEntityMenu("");
+                                  setSelectedTags((ids) =>
+                                    ids.filter((id) => id !== entity.id),
+                                  );
+                                  if (
+                                    table === "categories" &&
+                                    type === entity.id
+                                  )
+                                    showAllFilms();
+                                  if (
+                                    table === "tags" &&
+                                    filters.tags?.includes(entity.id)
+                                  ) {
+                                    setFilter({
+                                      ...filters,
+                                      tags: filters.tags.filter(
+                                        (id) => id !== entity.id,
+                                      ),
+                                    });
+                                  }
+                                  if (entityDraft?.id === entity.id)
+                                    setEntityDraft(null);
+                                  entitySearch.current?.focus();
+                                }
+                            }}
+                          >
+                            {entityTab === "tags" ? (
+                              "删除"
+                            ) : (
+                              <Trash2 size={16} />
+                            )}
+                          </button>
+                        </div>
+                      </div>
+                      {entityTab === "tags" &&
+                        entityDraft?.id === entity.id &&
+                        renderEntityForm()}
+                    </React.Fragment>
+                  ))}
                 </div>
-              ))}
-            {!(
-              entityTab === "tags"
-                ? tags
-                : catalog[entityTab as keyof Catalog] || []
-            ).length && (
-              <p className="empty-hint">暂无项目，点击上方“新增”开始创建。</p>
+              </section>
+            ))}
+            {!visibleEntities.length && (
+              <p className="empty-hint">
+                {entityTab === "tags"
+                  ? managedEntities.length
+                    ? "没有符合当前条件的标签"
+                    : "还没有标签，可点「新增标签」创建。"
+                  : managedEntities.length
+                    ? "没有匹配的项目"
+                    : "暂无项目"}
+              </p>
             )}
+          </Modal>
+        )}
+        {(panel === "entities" || panel === "tags") && mergeSource && (
+          <Modal
+            title={`合并「${mergeSource.name}」`}
+            close={() => setMergeSource(null)}
+          >
+            <label>
+              搜索要保留的项目
+              <input
+                autoFocus
+                value={mergeQuery}
+                onChange={(e) => setMergeQuery(e.target.value)}
+              />
+            </label>
+            {managedEntities
+              .filter(
+                (target) =>
+                  target.id !== mergeSource.id &&
+                  matchesEntity(target, mergeQuery),
+              )
+              .map((target) => (
+                <button
+                  key={target.id}
+                  className="secondary full"
+                  onClick={async () => {
+                    const source = mergeSource;
+                    const affected =
+                      "totalUsageCount" in source
+                        ? `涉及 ${source.totalUsageCount ?? 0} 部关联影片。`
+                        : "";
+                    if (
+                      await askConfirm(
+                        `将「${source.name}」并入「${target.name}」。${affected}合并后保留「${target.name}」，并自动备份。`,
+                        "确认合并",
+                        "确认合并",
+                      )
+                    ) {
+                      if (
+                        await action(
+                          "合并资料",
+                          () =>
+                            api("merge_entity", {
+                              table: entityTab,
+                              source: source.id,
+                              target: target.id,
+                            }),
+                          ["catalog", "items"],
+                        )
+                      ) {
+                        if (
+                          entityTab === "tags" &&
+                          filters.tags?.includes(source.id)
+                        ) {
+                          setFilter({
+                            ...filters,
+                            tags: Array.from(
+                              new Set(
+                                filters.tags.map((tag) =>
+                                  tag === source.id ? target.id : tag,
+                                ),
+                              ),
+                            ),
+                          });
+                        }
+                        setSelectedTags((ids) =>
+                          ids.filter((id) => id !== source.id),
+                        );
+                        setMergeSource(null);
+                      }
+                    }
+                  }}
+                >
+                  {target.name}
+                </button>
+              ))}
           </Modal>
         )}
         {panel === "settings" && (
           <Modal title="播放器与资料来源" close={closeSettings} wide>
-            <p className="muted">
-              不设置路径时使用系统默认程序播放。需要自动加载已选外挂字幕时，请选择下面支持的播放器。
-            </p>
-            <button
-              className="secondary"
-              onClick={() =>
-                action(
-                  "检测本机环境",
-                  async () => setSystemInfo(await api("system_status")),
-                  false,
-                )
-              }
-            >
-              检测播放器与数据目录
-            </button>
-            {systemInfo && (
-              <div className="notice">
-                <p>
-                  版本：{systemInfo.version} · 数据目录：{systemInfo.dataPath}
+            <div className="settings-pane">
+              <section className="settings-section">
+                <h3>播放与字幕</h3>
+                <p className="muted">
+                  不设置路径时使用系统默认程序播放。需要自动加载已选外挂字幕时，请选择下面支持的播放器。
                 </p>
-                <p>
-                  {systemInfo.playerAvailable
-                    ? "已保存配置：播放器路径可用或使用系统默认程序"
-                    : "已保存配置：播放器路径已失效，请在下方重新选择并保存"}
+
+                <div className="settings-fields">
+                  <label>
+                    播放器程序（.exe，可选）
+                    <div className="row">
+                      <input
+                        value={settings.player}
+                        onChange={(e) =>
+                          setSettings({ ...settings, player: e.target.value })
+                        }
+                      />
+                      <button
+                        onClick={async () => {
+                          const p = await dialog({
+                            filters: [{ name: "播放器", extensions: ["exe"] }],
+                          });
+                          if (typeof p === "string")
+                            setSettings({ ...settings, player: p });
+                        }}
+                      >
+                        选择
+                      </button>
+                    </div>
+                  </label>
+                  <label>
+                    播放器类型（与所选程序一致）
+                    <select
+                      value={settings.playerKind}
+                      onChange={(e) =>
+                        setSettings({ ...settings, playerKind: e.target.value })
+                      }
+                    >
+                      <option value="potplayer">PotPlayer</option>
+                      <option value="mpv">mpv</option>
+                      <option value="vlc">VLC</option>
+                    </select>
+                  </label>
+                </div>
+                <button
+                  className="secondary full"
+                  onClick={() =>
+                    action(
+                      "测试播放器",
+                      () => api("test_player", { settings }),
+                      false,
+                    )
+                  }
+                >
+                  测试画面与字幕（无需保存设置）
+                </button>
+                <p className="muted">
+                  视频缩略图、时长和分辨率由 Windows
+                  自动读取，无需配置媒体工具。系统不支持的格式可手动导入封面。
                 </p>
-                {systemInfo.detected?.map((p: any) => (
-                  <button
-                    key={p.path}
-                    onClick={() =>
+              </section>
+              <section className="settings-section">
+                <h3>目录核对</h3>
+                <label>
+                  完整目录核对间隔
+                  <select
+                    aria-label="完整目录核对间隔"
+                    value={settings.scanMinutes ?? 30}
+                    onChange={(e) =>
                       setSettings({
                         ...settings,
-                        player: p.path,
-                        playerKind: p.kind,
+                        scanMinutes: Number(e.target.value),
                       })
                     }
                   >
-                    使用 {p.kind}
-                  </button>
-                ))}
-                <button
-                  onClick={() =>
-                    action("打开数据目录", () => api("reveal_data"), false)
-                  }
-                >
-                  打开数据目录
-                </button>
-                <p>
-                  缩略图缓存：{bytes(systemInfo.previewBytes)} · 封面：
-                  {bytes(systemInfo.coverBytes)} · 自动备份{" "}
-                  {systemInfo.backups?.length || 0} 份（保留供手动核查）
+                    {[10, 30, 60, 120, 1440].map((n) => (
+                      <option key={n} value={n}>
+                        {n === 1440 ? "每天" : n + " 分钟"}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <p className="muted">
+                  点击“保存设置”后生效。目录发生变化时仍会自动扫描对应目录。
                 </p>
-              </div>
-            )}
-            <label>
-              完整目录核对间隔
-              <select
-                aria-label="完整目录核对间隔"
-                value={settings.scanMinutes ?? 30}
-                onChange={(e) =>
-                  setSettings({
-                    ...settings,
-                    scanMinutes: Number(e.target.value),
-                  })
-                }
-              >
-                {[10, 30, 60, 120, 1440].map((n) => (
-                  <option key={n} value={n}>
-                    {n === 1440 ? "每天" : n + " 分钟"}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <p className="muted">
-              点击“保存设置”后生效。目录发生变化时仍会自动扫描对应目录。
-            </p>
-            <label>
-              播放器程序（.exe，可选）
-              <div className="row">
-                <input
-                  value={settings.player}
-                  onChange={(e) =>
-                    setSettings({ ...settings, player: e.target.value })
-                  }
-                />
+              </section>
+              <section className="settings-section">
+                <details>
+                  <summary>本机环境与数据目录</summary>
+                  <button
+                    className="secondary"
+                    onClick={() =>
+                      action(
+                        "检测本机环境",
+                        async () => setSystemInfo(await api("system_status")),
+                        false,
+                      )
+                    }
+                  >
+                    检测播放器与数据目录
+                  </button>
+                  {systemInfo && (
+                    <div className="notice">
+                      <p>
+                        版本：{systemInfo.version} · 数据目录：
+                        {systemInfo.dataPath}
+                      </p>
+                      <p>
+                        {systemInfo.playerAvailable
+                          ? "已保存配置：播放器路径可用或使用系统默认程序"
+                          : "已保存配置：播放器路径已失效，请在下方重新选择并保存"}
+                      </p>
+                      {systemInfo.detected?.map((p: any) => (
+                        <button
+                          key={p.path}
+                          onClick={() =>
+                            setSettings({
+                              ...settings,
+                              player: p.path,
+                              playerKind: p.kind,
+                            })
+                          }
+                        >
+                          使用 {p.kind}
+                        </button>
+                      ))}
+                      <button
+                        onClick={() =>
+                          action(
+                            "打开数据目录",
+                            () => api("reveal_data"),
+                            false,
+                          )
+                        }
+                      >
+                        打开数据目录
+                      </button>
+                      <p>
+                        缩略图缓存：{bytes(systemInfo.previewBytes)} · 封面：
+                        {bytes(systemInfo.coverBytes)} · 自动备份{" "}
+                        {systemInfo.backups?.length || 0} 份（保留供手动核查）
+                      </p>
+                    </div>
+                  )}
+                </details>
+              </section>
+              <section className="settings-section">
+                <details>
+                  <summary>高级资料来源设置</summary>
+                  <h3>字段来源优先级</h3>
+                  <p className="muted">
+                    人工保护始终优先。未指定时按下方来源列表顺序取值。
+                  </p>
+                  <div className="form-grid">
+                    {[
+                      ["title", "片名"],
+                      ["studio", "厂商"],
+                      ["performers", "演员"],
+                      ["description", "简介"],
+                      ["releaseDate", "日期"],
+                    ].map(([field, label]) => (
+                      <label key={field}>
+                        {label}首选来源
+                        <select
+                          value={settings.priorities?.[field]?.[0] || ""}
+                          onChange={(e) =>
+                            setSettings({
+                              ...settings,
+                              priorities: {
+                                ...(settings.priorities || {}),
+                                [field]: e.target.value
+                                  ? [
+                                      e.target.value,
+                                      ...settings.providers
+                                        .filter((p) => p.id !== e.target.value)
+                                        .map((p) => p.id),
+                                    ]
+                                  : settings.providers.map((p) => p.id),
+                              },
+                            })
+                          }
+                        >
+                          <option value="">按来源列表顺序</option>
+                          {settings.providers.map((p) => (
+                            <option key={p.id} value={p.id}>
+                              {p.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ))}
+                  </div>
+                  <h3>手动联网来源</h3>
+                  <p className="muted">
+                    点击获取资料时才查询。设为仅本地整理的影片会跳过。来源可能限制访问，所有结果先核查再保存。来源域名和图片
+                    CDN 需显式列入允许范围。
+                  </p>
+                  {settings.providers.map((p, index) => (
+                    <div className="provider" key={p.id}>
+                      <div className="row wrap provider-tools">
+                        <button
+                          disabled={index === 0}
+                          onClick={() =>
+                            setSettings((v) => {
+                              const providers = [...v.providers];
+                              [providers[index - 1], providers[index]] = [
+                                providers[index],
+                                providers[index - 1],
+                              ];
+                              return { ...v, providers };
+                            })
+                          }
+                        >
+                          上移
+                        </button>
+                        <button
+                          disabled={index === settings.providers.length - 1}
+                          onClick={() =>
+                            setSettings((v) => {
+                              const providers = [...v.providers];
+                              [providers[index], providers[index + 1]] = [
+                                providers[index + 1],
+                                providers[index],
+                              ];
+                              return { ...v, providers };
+                            })
+                          }
+                        >
+                          下移
+                        </button>
+                        <button
+                          onClick={async () => {
+                            if (
+                              await askConfirm(
+                                "从设置中移除来源“" +
+                                  p.name +
+                                  "”？已保存的影片资料会保留。",
+                                "移除资料来源",
+                                "移除来源",
+                              )
+                            )
+                              setSettings((v) => ({
+                                ...v,
+                                providers: v.providers.filter(
+                                  (x) => x.id !== p.id,
+                                ),
+                                priorities: Object.fromEntries(
+                                  Object.entries(v.priorities || {}).map(
+                                    ([field, ids]) => [
+                                      field,
+                                      ids.filter((id) => id !== p.id),
+                                    ],
+                                  ),
+                                ),
+                              }));
+                          }}
+                        >
+                          移除来源
+                        </button>
+                      </div>
+                      <label className="check-label">
+                        <input
+                          type="checkbox"
+                          checked={p.enabled}
+                          onChange={(e) =>
+                            setSettings({
+                              ...settings,
+                              providers: settings.providers.map((v, n) =>
+                                n === index
+                                  ? { ...v, enabled: e.target.checked }
+                                  : v,
+                              ),
+                            })
+                          }
+                        />
+                        {p.name}
+                      </label>
+                      <label>
+                        搜索地址（关键词位置使用 {"{query}"}）
+                        <input
+                          value={p.searchUrl}
+                          onChange={(e) =>
+                            setSettings({
+                              ...settings,
+                              providers: settings.providers.map((v, n) =>
+                                n === index
+                                  ? { ...v, searchUrl: e.target.value }
+                                  : v,
+                              ),
+                            })
+                          }
+                        />
+                      </label>
+                      <label>
+                        允许域名（逗号分隔）
+                        <input
+                          value={p.allowedHosts.join(",")}
+                          onChange={(e) =>
+                            setSettings({
+                              ...settings,
+                              providers: settings.providers.map((v, n) =>
+                                n === index
+                                  ? {
+                                      ...v,
+                                      allowedHosts: e.target.value
+                                        .split(",")
+                                        .map((s) => s.trim())
+                                        .filter(Boolean),
+                                    }
+                                  : v,
+                              ),
+                            })
+                          }
+                        />
+                      </label>
+                    </div>
+                  ))}
+                  <button
+                    className="secondary"
+                    onClick={async () => {
+                      const name = await askText("来源名称");
+                      if (name)
+                        setSettings((v) => ({
+                          ...v,
+                          providers: [
+                            ...v.providers,
+                            {
+                              id: crypto.randomUUID(),
+                              name,
+                              mediaTypes: ["jav", "western"],
+                              searchUrl: "",
+                              allowedHosts: [],
+                              enabled: true,
+                            },
+                          ],
+                        }));
+                    }}
+                  >
+                    添加结构化网页来源
+                  </button>
+                </details>
+              </section>
+              <div className="dialog-footer sticky-actions">
+                <button className="secondary" onClick={closeSettings}>
+                  取消
+                </button>
                 <button
+                  className="primary"
                   onClick={async () => {
-                    const p = await dialog({
-                      filters: [{ name: "播放器", extensions: ["exe"] }],
-                    });
-                    if (typeof p === "string")
-                      setSettings({ ...settings, player: p });
+                    const ok = await action(
+                      "保存设置",
+                      async () => {
+                        for (const p of settings.providers.filter(
+                          (p) => p.enabled,
+                        )) {
+                          if (!p.name.trim())
+                            throw new Error("资料来源名称不能为空");
+                          if (
+                            !/^https:\/\//i.test(p.searchUrl) ||
+                            !p.searchUrl.includes("{query}") ||
+                            !p.allowedHosts.length
+                          )
+                            throw new Error(
+                              "请完善已启用来源的 HTTPS 搜索地址（含 {query}）和允许域名，或先取消启用该来源。",
+                            );
+                        }
+                        await libraryApi.saveSettings(settings);
+                        setPanel("");
+                      },
+                      false,
+                    );
+                    if (ok && resumePlayback) {
+                      const item = resumePlayback;
+                      setResumePlayback(null);
+                      await play(item);
+                    }
                   }}
                 >
-                  选择
+                  保存设置
                 </button>
               </div>
-            </label>
-            <label>
-              播放器类型（与所选程序一致）
-              <select
-                value={settings.playerKind}
-                onChange={(e) =>
-                  setSettings({ ...settings, playerKind: e.target.value })
-                }
-              >
-                <option value="potplayer">PotPlayer</option>
-                <option value="mpv">mpv</option>
-                <option value="vlc">VLC</option>
-              </select>
-            </label>
-            <button
-              className="secondary full"
-              onClick={() =>
-                action(
-                  "测试播放器",
-                  () => api("test_player", { settings }),
-                  false,
-                )
-              }
-            >
-              测试画面与字幕（无需保存设置）
-            </button>
-            <p className="muted">
-              视频缩略图、时长和分辨率由 Windows
-              自动读取，无需配置媒体工具。系统不支持的格式可手动导入封面。
-            </p>
-            <hr />
-            <details>
-              <summary>高级资料来源设置</summary>
-              <h3>字段来源优先级</h3>
-              <p className="muted">
-                人工保护始终优先。未指定时按下方来源列表顺序取值。
-              </p>
-              <div className="form-grid">
-                {[
-                  ["title", "片名"],
-                  ["studio", "厂商"],
-                  ["performers", "演员"],
-                  ["description", "简介"],
-                  ["releaseDate", "日期"],
-                ].map(([field, label]) => (
-                  <label key={field}>
-                    {label}首选来源
-                    <select
-                      value={settings.priorities?.[field]?.[0] || ""}
-                      onChange={(e) =>
-                        setSettings({
-                          ...settings,
-                          priorities: {
-                            ...(settings.priorities || {}),
-                            [field]: e.target.value
-                              ? [
-                                  e.target.value,
-                                  ...settings.providers
-                                    .filter((p) => p.id !== e.target.value)
-                                    .map((p) => p.id),
-                                ]
-                              : settings.providers.map((p) => p.id),
-                          },
-                        })
-                      }
-                    >
-                      <option value="">按来源列表顺序</option>
-                      {settings.providers.map((p) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                ))}
-              </div>
-              <h3>手动联网来源</h3>
-              <p className="muted">
-                仅在你点击获取资料时查询；个人片段被后端排除。来源可能限制访问，所有结果先核查再保存。来源域名和图片
-                CDN 需显式列入允许范围。
-              </p>
-              {settings.providers.map((p, index) => (
-                <div className="provider" key={p.id}>
-                  <div className="row wrap provider-tools">
-                    <button
-                      disabled={index === 0}
-                      onClick={() =>
-                        setSettings((v) => {
-                          const providers = [...v.providers];
-                          [providers[index - 1], providers[index]] = [
-                            providers[index],
-                            providers[index - 1],
-                          ];
-                          return { ...v, providers };
-                        })
-                      }
-                    >
-                      上移
-                    </button>
-                    <button
-                      disabled={index === settings.providers.length - 1}
-                      onClick={() =>
-                        setSettings((v) => {
-                          const providers = [...v.providers];
-                          [providers[index], providers[index + 1]] = [
-                            providers[index + 1],
-                            providers[index],
-                          ];
-                          return { ...v, providers };
-                        })
-                      }
-                    >
-                      下移
-                    </button>
-                    <button
-                      onClick={async () => {
-                        if (
-                          await askConfirm(
-                            "从设置中移除来源“" +
-                              p.name +
-                              "”？已保存的影片资料会保留。",
-                            "移除资料来源",
-                            "移除来源",
-                          )
-                        )
-                          setSettings((v) => ({
-                            ...v,
-                            providers: v.providers.filter((x) => x.id !== p.id),
-                            priorities: Object.fromEntries(
-                              Object.entries(v.priorities || {}).map(
-                                ([field, ids]) => [
-                                  field,
-                                  ids.filter((id) => id !== p.id),
-                                ],
-                              ),
-                            ),
-                          }));
-                      }}
-                    >
-                      移除来源
-                    </button>
-                  </div>
-                  <label className="check-label">
-                    <input
-                      type="checkbox"
-                      checked={p.enabled}
-                      onChange={(e) =>
-                        setSettings({
-                          ...settings,
-                          providers: settings.providers.map((v, n) =>
-                            n === index
-                              ? { ...v, enabled: e.target.checked }
-                              : v,
-                          ),
-                        })
-                      }
-                    />
-                    {p.name}
-                  </label>
-                  <label>
-                    搜索地址（关键词位置使用 {"{query}"}）
-                    <input
-                      value={p.searchUrl}
-                      onChange={(e) =>
-                        setSettings({
-                          ...settings,
-                          providers: settings.providers.map((v, n) =>
-                            n === index
-                              ? { ...v, searchUrl: e.target.value }
-                              : v,
-                          ),
-                        })
-                      }
-                    />
-                  </label>
-                  <label>
-                    允许域名（逗号分隔）
-                    <input
-                      value={p.allowedHosts.join(",")}
-                      onChange={(e) =>
-                        setSettings({
-                          ...settings,
-                          providers: settings.providers.map((v, n) =>
-                            n === index
-                              ? {
-                                  ...v,
-                                  allowedHosts: e.target.value
-                                    .split(",")
-                                    .map((s) => s.trim())
-                                    .filter(Boolean),
-                                }
-                              : v,
-                          ),
-                        })
-                      }
-                    />
-                  </label>
-                </div>
-              ))}
-              <button
-                className="secondary"
-                onClick={async () => {
-                  const name = await askText("来源名称");
-                  if (name)
-                    setSettings((v) => ({
-                      ...v,
-                      providers: [
-                        ...v.providers,
-                        {
-                          id: crypto.randomUUID(),
-                          name,
-                          mediaTypes: ["jav", "western"],
-                          searchUrl: "",
-                          allowedHosts: [],
-                          enabled: true,
-                        },
-                      ],
-                    }));
-                }}
-              >
-                添加结构化网页来源
-              </button>
-            </details>
-            <div className="dialog-footer sticky-actions">
-              <button className="secondary" onClick={closeSettings}>
-                取消
-              </button>
-              <button
-                className="primary"
-                onClick={async () => {
-                  const ok = await action(
-                    "保存设置",
-                    async () => {
-                      for (const p of settings.providers.filter(
-                        (p) => p.enabled,
-                      )) {
-                        if (!p.name.trim())
-                          throw new Error("资料来源名称不能为空");
-                        if (
-                          !/^https:\/\//i.test(p.searchUrl) ||
-                          !p.searchUrl.includes("{query}") ||
-                          !p.allowedHosts.length
-                        )
-                          throw new Error(
-                            "请完善已启用来源的 HTTPS 搜索地址（含 {query}）和允许域名，或先取消启用该来源。",
-                          );
-                      }
-                      await libraryApi.saveSettings(settings);
-                      setPanel("");
-                    },
-                    false,
-                  );
-                  if (ok && resumePlayback) {
-                    const item = resumePlayback;
-                    setResumePlayback(null);
-                    await play(item);
-                  }
-                }}
-              >
-                保存设置
-              </button>
             </div>
           </Modal>
         )}
@@ -3029,7 +3747,7 @@ function App() {
           <Modal title="获取影片资料" close={() => setPanel("")}>
             <p className="muted">
               选中 {scrapeIds.length}{" "}
-              部。个人片段会跳过；已有人工保护字段保持不变。
+              部。设为仅本地整理的影片会跳过。已有人工保护字段会保留。
             </p>
             <label>
               资料来源
@@ -3655,6 +4373,7 @@ function App() {
                       return false;
                     await libraryApi.restore(path);
                     resetOrder();
+                    showAllFilms();
                   },
                   allLibraryData,
                 )

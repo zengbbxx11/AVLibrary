@@ -156,6 +156,9 @@ fn reconcile(
     )
     .map_err(err)?;
     let mut count = 0;
+    let mut file_at_path = tx.prepare_cached(
+        "SELECT id,item_id,identity FROM media_files WHERE path=?1",
+    ).map_err(err)?;
     for p in paths.iter().filter(|p| is_video(p)) {
         if cancel.load(Ordering::SeqCst) {
             return Err("扫描已取消".into());
@@ -163,9 +166,8 @@ fn reconcile(
         let meta = fs::metadata(p).map_err(err)?;
         let path = p.to_string_lossy().to_string();
         let ident = identity(p);
-        let at_path: Option<(String, String, Option<String>)> = tx
+        let at_path: Option<(String, String, Option<String>)> = file_at_path
             .query_row(
-                "SELECT id,item_id,identity FROM media_files WHERE path=?1",
                 [&path],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
@@ -178,7 +180,7 @@ fn reconcile(
         if matched.is_none() {
             if let Some(i) = &ident {
                 let mut q = tx
-                    .prepare("SELECT id,item_id,path FROM media_files WHERE identity=?1")
+                    .prepare_cached("SELECT id,item_id,path FROM media_files WHERE identity=?1")
                     .map_err(err)?;
                 let rows = q
                     .query_map([i], |r| {
@@ -222,6 +224,10 @@ fn reconcile(
             };
             tx.execute("INSERT INTO items(id,root_id,path,identity,title,code,media_type,size,added_at,release_date) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",params![item,root_id,path,ident,name,code,target.media_type,meta.len() as i64,stamp(),release]).map_err(err)?;
             tx.execute(
+                "INSERT INTO item_categories(item_id,category_id) SELECT ?1,category_id FROM root_categories WHERE root_id=?2",
+                params![item,root_id],
+            ).map_err(err)?;
+            tx.execute(
                 "INSERT INTO media_files VALUES(?1,?2,?3,?4,?5,?6,1,1)",
                 params![id(), item, root_id, path, ident, meta.len() as i64],
             )
@@ -240,6 +246,7 @@ fn reconcile(
         }
         count += 1;
     }
+    drop(file_at_path);
     tx.execute("UPDATE items SET available=coalesce((SELECT available FROM media_files WHERE item_id=items.id AND is_primary=1),0) WHERE root_id=?1",[root_id]).map_err(err)?;
     let subs = {
         let mut q = tx
@@ -254,12 +261,17 @@ fn reconcile(
     };
     let mut by_stem: HashMap<&OsStr, Vec<&(String, String)>> = HashMap::new();
     let mut by_code: HashMap<String, Vec<&(String, String)>> = HashMap::new();
+    let mut by_folded_local_stem = HashMap::<_, Vec<_>>::new();
     for subtitle in &subs {
         if cancel.load(Ordering::SeqCst) {
             return Err("扫描已取消".into());
         }
-        if let Some(stem) = Path::new(&subtitle.1).file_stem() {
+        let path = Path::new(&subtitle.1);
+        if let Some(stem) = path.file_stem() {
             by_stem.entry(stem).or_default().push(subtitle);
+            if let Some(key) = folded_local_stem(path) {
+                by_folded_local_stem.entry(key).or_default().push(subtitle);
+            }
             let code = normalize_code(&stem.to_string_lossy());
             if !code.is_empty() {
                 by_code.entry(code).or_default().push(subtitle);
@@ -305,15 +317,24 @@ fn reconcile(
             continue;
         }
         let p = Path::new(&path);
-        let Some(candidates) = p.file_stem().and_then(|stem| by_stem.get(stem))
-            .or_else(|| by_code.get(&code)) else {
+        let exact = p.file_stem().and_then(|stem| by_stem.get(stem));
+        let folded = folded_local_stem(p).and_then(|key| by_folded_local_stem.get(&key));
+        let parent = p.parent().map(|path| path_key(&path.to_string_lossy()));
+        let in_same_directory = |sub: &str| {
+            Path::new(sub).parent().map(|path| path_key(&path.to_string_lossy())) == parent
+        };
+        let candidates = if exact.is_some_and(|matches| matches.iter().any(|(_, path)| in_same_directory(path))) {
+            exact
+        } else {
+            folded.or(exact)
+        }.or_else(|| by_code.get(&code));
+        let Some(candidates) = candidates else {
             continue;
         };
-        let parent = p.parent().map(|path| path_key(&path.to_string_lossy()));
         let mut local = candidates
             .iter()
             .copied()
-            .filter(|(_, sub)| Path::new(sub).parent().map(|path| path_key(&path.to_string_lossy())) == parent);
+            .filter(|(_, sub)| in_same_directory(sub));
         let (first, ambiguous) = match local.next() {
             Some(first) => (first, local.next().is_some()),
             None => (candidates[0], candidates.len() > 1),
@@ -346,9 +367,18 @@ fn reconcile(
     tx.commit().map_err(err)?;
     Ok(count)
 }
+fn folded_local_stem(path: &Path) -> Option<(String, String)> {
+    Some((
+        path_key(&path.parent()?.to_string_lossy()),
+        path.file_stem()?.to_str()?.to_lowercase(),
+    ))
+}
+
 fn western_date(name: &str) -> String {
-    let re = regex::Regex::new(r"(?:^|[._ -])(\d{2}|20\d{2})[._-](\d{2})[._-](\d{2})(?:[._ -]|$)")
-        .unwrap();
+    static DATE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = DATE.get_or_init(|| {
+        regex::Regex::new(r"(?:^|[._ -])(\d{2}|20\d{2})[._-](\d{2})[._-](\d{2})(?:[._ -]|$)").unwrap()
+    });
     if let Some(c) = re.captures(name) {
         let year = if c[1].len() == 2 {
             format!("20{}", &c[1])
@@ -883,6 +913,10 @@ pub(super) fn separate_impl(s: &AppState, file_id: &str) -> Result<()> {
             .unwrap_or_default()
             .to_string_lossy();
         tx.execute("INSERT INTO items(id,root_id,path,title,media_type,size,code,added_at) VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![item,root,path,name,kind,size,normalize_code(&name),stamp()]).map_err(err)?;
+        tx.execute(
+            "INSERT INTO item_categories(item_id,category_id) SELECT ?1,category_id FROM item_categories WHERE item_id=?2",
+            params![item,owner],
+        ).map_err(err)?;
     }
     tx.execute(
         "UPDATE media_files SET is_primary=0 WHERE item_id=?1",

@@ -31,6 +31,7 @@ pub struct Filters {
     pub duration_max: Option<f64>,
     pub unrated: bool,
     pub target_id: String,
+    pub category_id: String,
     pub sort: String,
 }
 pub fn migrate(c: &mut Connection, version: i64) -> Result<()> {
@@ -124,6 +125,7 @@ fn row_item(r: &rusqlite::Row) -> rusqlite::Result<Item> {
         title: r.get(3)?,
         code: r.get(4)?,
         media_type: r.get(5)?,
+        category_id: r.get(28)?,
         size: r.get(6)?,
         duration: r.get(7)?,
         rating: r.get(8)?,
@@ -178,6 +180,93 @@ fn like(value: &str) -> String {
             .replace('_', "\\_")
     )
 }
+pub fn ensure_performance_indexes(c: &Connection) -> Result<()> {
+    c.execute_batch(
+        "CREATE INDEX IF NOT EXISTS library_by_activity
+            ON items(removed,max(added_at,coalesce(last_launched_at,0)) DESC,id)
+            WHERE merged_into IS NULL;
+         CREATE INDEX IF NOT EXISTS items_by_root ON items(root_id);
+         CREATE INDEX IF NOT EXISTS media_files_by_root ON media_files(root_id);
+         CREATE INDEX IF NOT EXISTS subtitles_by_root ON subtitles(root_id);
+         CREATE INDEX IF NOT EXISTS local_job_history_by_version ON jobs(item_id,query)
+            WHERE kind='local' AND state IN('saved','failed','cancelled');",
+    ).map_err(err)
+}
+const ACTIVE_ITEMS: &str = "i.merged_into IS NULL AND i.removed=?";
+const ACTIVITY_ORDER: &str = "max(i.added_at,coalesce(i.last_launched_at,0)) DESC,i.id";
+const SEARCH_RELEVANCE: &str = "CASE WHEN replace(i.code,'-','')=? THEN 0 WHEN i.title=? THEN 0 WHEN i.title LIKE ? ESCAPE '\\' THEN 1 ELSE 2 END,";
+
+fn add_search(
+    sql: &mut String,
+    values: &mut Vec<rusqlite::types::Value>,
+    query: &str,
+    code: &str,
+) {
+    sql.push_str(" AND (i.title LIKE ? ESCAPE '\\' OR replace(i.code,'-','') LIKE ? ESCAPE '\\'
+      OR i.note LIKE ? ESCAPE '\\'
+      OR EXISTS(SELECT 1 FROM item_tags it JOIN tags t ON t.id=it.tag_id WHERE it.item_id=i.id AND t.name LIKE ? ESCAPE '\\')
+      OR EXISTS(SELECT 1 FROM item_performers ip JOIN performers p ON p.id=ip.performer_id WHERE ip.item_id=i.id AND (p.name LIKE ? ESCAPE '\\' OR p.aliases LIKE ? ESCAPE '\\'))
+      OR EXISTS(SELECT 1 FROM studios s WHERE s.id=i.studio_id AND (s.name LIKE ? ESCAPE '\\' OR s.aliases LIKE ? ESCAPE '\\')))");
+    let needle = like(query);
+    values.extend([needle.clone().into(), like(code).into()]);
+    values.extend((0..6).map(|_| needle.clone().into()));
+}
+
+fn search_code(query: &str) -> String {
+    query.to_uppercase().replace(['-', '_', ' '], "")
+}
+
+fn relevance_parameters(values: &mut Vec<rusqlite::types::Value>, query: &str, code: String) {
+    values.extend([
+        code.into(),
+        query.to_string().into(),
+        format!("{}%", query.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_")).into(),
+    ]);
+}
+
+#[derive(Serialize)]
+pub struct SearchSuggestion {
+    id: String,
+    title: String,
+    code: String,
+}
+
+pub fn suggestions(c: &Connection, query: &str) -> Result<Vec<SearchSuggestion>> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let code = search_code(query);
+    let mut where_clause = ACTIVE_ITEMS.to_string();
+    let mut values = vec![0_i64.into()];
+    add_search(&mut where_clause, &mut values, query, &code);
+    relevance_parameters(&mut values, query, code);
+    let mut statement = c.prepare_cached(&format!(
+        "SELECT i.id,i.title,i.code FROM items i WHERE {where_clause}
+         ORDER BY {SEARCH_RELEVANCE}{ACTIVITY_ORDER} LIMIT 8"
+    )).map_err(err)?;
+    let rows = statement.query_map(rusqlite::params_from_iter(values.iter()), |row| {
+        Ok(SearchSuggestion { id: row.get(0)?, title: row.get(1)?, code: row.get(2)? })
+    }).map_err(err)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>().map_err(err)
+}
+
+pub struct LibraryPage {
+    items: Vec<Item>,
+    subtitle_identities: Vec<Option<String>>,
+    total: i64,
+}
+
+impl LibraryPage {
+    pub fn into_page(self) -> Page {
+        let mut items = self.items;
+        for (item, expected) in items.iter_mut().zip(self.subtitle_identities) {
+            subtitle_state(&mut item.details, item.subtitle.as_deref(), expected);
+        }
+        Page { items, total: self.total }
+    }
+}
+
+#[cfg(test)]
 pub fn list(
     c: &Connection,
     query: &str,
@@ -187,23 +276,28 @@ pub fn list(
     limit: i64,
     f: &Filters,
 ) -> Result<Page> {
-    let n = query.to_uppercase().replace(['-', '_', ' '], "");
-    let mut sql=String::from("i.merged_into IS NULL AND i.removed=? AND (?='' OR i.media_type=?) AND (?='' OR i.title LIKE ? ESCAPE '\\' OR replace(i.code,'-','') LIKE ? ESCAPE '\\' OR i.note LIKE ? ESCAPE '\\' OR EXISTS(SELECT 1 FROM item_tags it JOIN tags t ON t.id=it.tag_id WHERE it.item_id=i.id AND t.name LIKE ? ESCAPE '\\') OR EXISTS(SELECT 1 FROM item_performers ip JOIN performers p ON p.id=ip.performer_id WHERE ip.item_id=i.id AND (p.name LIKE ? ESCAPE '\\' OR p.aliases LIKE ? ESCAPE '\\')) OR EXISTS(SELECT 1 FROM studios s WHERE s.id=i.studio_id AND (s.name LIKE ? ESCAPE '\\' OR s.aliases LIKE ? ESCAPE '\\'))) ");
-    let needle = like(query);
-    let mut v: Vec<rusqlite::types::Value> = vec![
-        (removed as i64).into(),
-        media_type.to_string().into(),
-        media_type.to_string().into(),
-        query.to_string().into(),
-        needle.clone().into(),
-        like(&n).into(),
-        needle.clone().into(),
-        needle.clone().into(),
-        needle.clone().into(),
-        needle.clone().into(),
-        needle.clone().into(),
-        needle.into(),
-    ];
+    Ok(read_page(c, query, media_type, removed, offset, limit, f)?.into_page())
+}
+
+pub fn read_page(
+    c: &Connection,
+    query: &str,
+    media_type: &str,
+    removed: bool,
+    offset: i64,
+    limit: i64,
+    f: &Filters,
+) -> Result<LibraryPage> {
+    let code = search_code(query);
+    let mut sql = ACTIVE_ITEMS.to_string();
+    let mut v = vec![(removed as i64).into()];
+    if !media_type.is_empty() {
+        sql.push_str(" AND i.media_type=?");
+        v.push(media_type.to_string().into());
+    }
+    if !query.is_empty() {
+        add_search(&mut sql, &mut v, query, &code);
+    }
     if f.favorite {
         sql.push_str(" AND i.favorite=1")
     }
@@ -264,9 +358,14 @@ pub fn list(
         sql.push_str(" AND i.id=?");
         v.push(f.target_id.clone().into());
     }
+    if !f.category_id.is_empty() {
+        sql.push_str(" AND EXISTS(SELECT 1 FROM item_categories ic WHERE ic.item_id=i.id AND ic.category_id=?)");
+        v.push(f.category_id.clone().into());
+    }
     let total = c
+        .prepare_cached(&format!("SELECT count(*) FROM items i WHERE {}", sql))
+        .map_err(err)?
         .query_row(
-            &format!("SELECT count(*) FROM items i WHERE {}", sql),
             rusqlite::params_from_iter(v.iter()),
             |r| r.get(0),
         )
@@ -277,26 +376,27 @@ pub fn list(
       "title"=>"i.title COLLATE NOCASE ASC,i.id",
       "rating"=>"i.rating IS NULL,i.rating DESC,i.added_at DESC,i.id",
       "duration"=>"i.duration IS NULL,i.duration DESC,i.added_at DESC,i.id",
-      _=>"max(i.added_at,coalesce(i.last_launched_at,0)) DESC,i.id"
+      _=>ACTIVITY_ORDER
     };
     let relevance=if !query.is_empty() && (f.sort.is_empty()||f.sort=="activity"){
-        v.extend([n.into(),query.to_string().into(),format!("{}%",query.replace('\\',"\\\\").replace('%',"\\%").replace('_',"\\_")).into()]);
-        "CASE WHEN replace(i.code,'-','')=? THEN 0 WHEN i.title=? THEN 0 WHEN i.title LIKE ? ESCAPE '\\' THEN 1 ELSE 2 END,"
+        relevance_parameters(&mut v, query, code);
+        SEARCH_RELEVANCE
     }else{""};
-    sql = format!("SELECT {ITEM_COLUMNS},{DETAIL_COLUMNS},sub.identity FROM items i {DETAIL_JOINS} WHERE {sql} ORDER BY {relevance}{ordering} LIMIT ? OFFSET ?");
+    sql = format!("SELECT {ITEM_COLUMNS},{DETAIL_COLUMNS},sub.identity,(SELECT category_id FROM item_categories WHERE item_id=i.id) FROM items i {DETAIL_JOINS} WHERE {sql} ORDER BY {relevance}{ordering} LIMIT ? OFFSET ?");
     v.extend([limit.clamp(1,200).into(),offset.max(0).into()]);
     let mut q = c.prepare_cached(&sql).map_err(err)?;
     let rows = q.query_map(rusqlite::params_from_iter(v.iter()), |r| {
         Ok((row_item(r)?, r.get::<_, Option<String>>(27)?))
     }).map_err(err)?;
     let mut items = Vec::new();
+    let mut subtitle_identities = Vec::new();
     for row in rows {
-        let (mut item, expected) = row.map_err(err)?;
-        subtitle_state(&mut item.details, item.subtitle.as_deref(), expected);
+        let (item, expected) = row.map_err(err)?;
         items.push(item);
+        subtitle_identities.push(expected);
     }
     page_relations(c, &mut items)?;
-    Ok(Page { items, total })
+    Ok(LibraryPage { items, subtitle_identities, total })
 }
 pub(super) fn entity(c: &Connection, table: &str, name: &str) -> Result<Option<String>> {
     let name = name.trim();
@@ -372,6 +472,9 @@ pub fn save(c: &mut Connection, item: &Item) -> Result<()> {
     }
     let studio = entity(&tx, "studios", &item.details.studio)?;
     tx.execute("UPDATE items SET title=?1,code=?2,media_type=?3,rating=?4,favorite=?5,note=?6,studio_id=?7,description=?8,release_date=?9,locks=?10,revision=revision+1 WHERE id=?11",params![item.title,item.code,item.media_type,item.rating,item.favorite,item.note,studio,item.details.description,item.details.release_date,serde_json::to_string(&locks).map_err(err)?,item.id]).map_err(err)?;
+    if let Some(category) = &item.category_id {
+        categories::assign(&tx, &item.id, category)?;
+    }
     tx.execute("DELETE FROM item_tags WHERE item_id=?1", [&item.id])
         .map_err(err)?;
     for tag in &item.tags {
@@ -399,22 +502,36 @@ pub fn save(c: &mut Connection, item: &Item) -> Result<()> {
     Ok(())
 }
 #[tauri::command]
-pub fn catalog(s: State<AppState>) -> Result<serde_json::Value> {
-    let c = db(&s)?;
+pub async fn catalog(app: tauri::AppHandle) -> Result<serde_json::Value> {
+    tauri::async_runtime::spawn_blocking(move || read_catalog(&*db(&app.state::<AppState>())?))
+        .await
+        .map_err(err)?
+}
+
+fn read_catalog(c: &Connection) -> Result<serde_json::Value> {
     let mut output = serde_json::Map::new();
-    for table in ["performers", "studios", "tag_groups", "saved_filters"] {
-        let mut q = c
-            .prepare(&format!("SELECT * FROM {} ORDER BY name", table))
-            .map_err(err)?;
+    for table in ["performers", "studios", "tag_groups", "saved_filters", "categories"] {
+        let sql = if table == "categories" {
+            "SELECT c.id,c.name,
+                (SELECT COUNT(*) FROM item_categories a WHERE a.category_id=c.id),
+                (SELECT COUNT(*) FROM root_categories r WHERE r.category_id=c.id)
+             FROM categories c ORDER BY c.name".to_string()
+        } else {
+            format!("SELECT * FROM {} ORDER BY name", table)
+        };
+        let mut q = c.prepare_cached(&sql).map_err(err)?;
         let rows = q
             .query_map([], |r| {
                 let mut v =
                     serde_json::json!({"id":r.get::<_,String>(0)?,"name":r.get::<_,String>(1)?});
                 if table == "saved_filters" {
                     v["value"] = serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default();
-                } else if table != "tag_groups" {
+                } else if matches!(table, "performers" | "studios") {
                     v["aliases"] =
                         serde_json::from_str(&r.get::<_, String>(2)?).unwrap_or_default();
+                } else if table == "categories" {
+                    v["itemCount"] = serde_json::json!(r.get::<_, i64>(2)?);
+                    v["rootCount"] = serde_json::json!(r.get::<_, i64>(3)?);
                 }
                 Ok(v)
             })
@@ -481,6 +598,11 @@ pub fn merge_entity(
             .map_err(err)?;
             tx.execute("DELETE FROM item_tags WHERE tag_id=?1", [&source])
                 .map_err(err)?;
+            tx.execute(
+                "INSERT INTO tag_meta(tag_id,pinned) SELECT ?1,1 FROM tag_meta WHERE tag_id=?2 AND pinned=1
+                 ON CONFLICT(tag_id) DO UPDATE SET pinned=1",
+                params![target,source],
+            ).map_err(err)?;
             tx.execute("DELETE FROM tag_meta WHERE tag_id=?1", [&source])
                 .map_err(err)?;
         }
@@ -553,6 +675,7 @@ pub struct Batch {
     pub add_tags: Vec<String>,
     pub remove_tags: Vec<String>,
     pub media_type: Option<String>,
+    pub category_id: Option<String>,
     pub favorite: Option<bool>,
 }
 #[tauri::command]
@@ -578,6 +701,9 @@ pub fn batch_edit(change: Batch, s: State<AppState>) -> Result<()> {
             .map_err(err)?;
         }
         tx.execute("UPDATE items SET media_type=coalesce(?1,media_type),favorite=coalesce(?2,favorite),revision=revision+1 WHERE id=?3",params![change.media_type,change.favorite,item]).map_err(err)?;
+        if let Some(category) = &change.category_id {
+            categories::assign(&tx, &item, category)?;
+        }
         if change.media_type.as_deref() == Some("personal") {
             tx.execute("UPDATE jobs SET state='cancelled' WHERE item_id=?1 AND state IN('queued','running','paused','review')",[&item]).map_err(err)?;
         }
@@ -587,7 +713,11 @@ pub fn batch_edit(change: Batch, s: State<AppState>) -> Result<()> {
 }
 #[tauri::command]
 pub fn set_tag_group(tag_id: String, group_id: Option<String>, s: State<AppState>) -> Result<()> {
-    db(&s)?.execute("INSERT INTO tag_meta VALUES(?1,?2) ON CONFLICT(tag_id) DO UPDATE SET group_id=excluded.group_id",params![tag_id,group_id]).map_err(err)?;
+    assign_tag_group(&*db(&s)?, &tag_id, group_id.as_deref())
+}
+
+pub fn assign_tag_group(c: &Connection, tag: &str, group: Option<&str>) -> Result<()> {
+    c.execute("INSERT INTO tag_meta(tag_id,group_id) VALUES(?1,?2) ON CONFLICT(tag_id) DO UPDATE SET group_id=excluded.group_id",params![tag,group]).map_err(err)?;
     Ok(())
 }
 

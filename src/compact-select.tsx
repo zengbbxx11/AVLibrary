@@ -1,5 +1,12 @@
-import React, { useEffect, useId, useRef, useState } from "react";
+import React, {
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import { Check, ChevronDown } from "lucide-react";
+import { useAnchoredPopup } from "./anchored-popup";
 
 type Option = { value: string; label: string };
 
@@ -17,6 +24,9 @@ export function CompactSelect({
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
   const ref = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const list = useRef<HTMLUListElement>(null);
+  useAnchoredPopup(open, trigger, list);
   const id = useId();
   const selected = Math.max(
     0,
@@ -30,11 +40,15 @@ export function CompactSelect({
     document.addEventListener("pointerdown", dismiss);
     return () => document.removeEventListener("pointerdown", dismiss);
   }, [open]);
-  useEffect(() => {
-    if (open)
-      ref.current
-        ?.querySelector<HTMLElement>(`[data-option-index="${active}"]`)
-        ?.scrollIntoView({ block: "nearest" });
+  useLayoutEffect(() => {
+    const popup = list.current;
+    const option = popup?.children[active];
+    if (!open || !popup || !option) return;
+    const bounds = popup.getBoundingClientRect();
+    const item = option.getBoundingClientRect();
+    if (item.top < bounds.top) popup.scrollTop += item.top - bounds.top - 5;
+    else if (item.bottom > bounds.bottom)
+      popup.scrollTop += item.bottom - bounds.bottom + 5;
   }, [active, open]);
   const select = (index: number) => {
     if (!options[index]) return;
@@ -42,8 +56,13 @@ export function CompactSelect({
     setOpen(false);
   };
   return (
-    <div ref={ref} className={"compact-select" + (open ? " open" : "")}>
+    <div
+      ref={ref}
+      data-popup-open={open || undefined}
+      className={"compact-select" + (open ? " open" : "")}
+    >
       <button
+        ref={trigger}
         type="button"
         role="combobox"
         aria-label={label}
@@ -90,20 +109,20 @@ export function CompactSelect({
           } else if (event.key === "Tab") setOpen(false);
         }}
       >
-        <span>{options[selected]?.label}</span>
+        <span title={options[selected]?.label}>{options[selected]?.label}</span>
         <ChevronDown size={14} aria-hidden="true" />
       </button>
       {open && (
         <ul
+          ref={list}
           id={id}
           role="listbox"
           aria-label={label + "选项"}
-          className="compact-menu"
+          className="compact-menu anchored-popup"
         >
           {options.map((option, index) => (
             <li
               id={`${id}-${index}`}
-              data-option-index={index}
               role="option"
               aria-selected={option.value === value}
               key={option.value}

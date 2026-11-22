@@ -204,6 +204,55 @@ fn stale_cancelled_and_personal_metadata_cannot_commit() {
 }
 
 #[test]
+fn nearby_subtitles_match_case_variants_and_leave_ambiguous_choices_for_review() {
+    let (dir, s, folder) = fixture();
+    db(&s).unwrap().execute("UPDATE roots SET media_type='personal'", []).unwrap();
+    for name in ["秋夜 Moon.MP4", "秋夜 moon.SRT", "Ocean.mp4", "ocean.srt", "OCEAN.ass"] {
+        fs::write(Path::new(&folder).join(name), b"fixture").unwrap();
+    }
+    assert_eq!(scanner::scan_root(&s, "root").unwrap(), 2);
+    let c = db(&s).unwrap();
+    let page = catalog::list(&c, "", "", false, 0, 60, &Default::default()).unwrap();
+    let moon = page.items.iter().find(|item| item.title == "秋夜 Moon").unwrap();
+    assert_eq!(moon.subtitle_confirmation, "auto_matched");
+    assert!(moon.subtitle.as_deref().unwrap().ends_with("秋夜 moon.SRT"));
+    let ocean = page.items.iter().find(|item| item.title == "Ocean").unwrap();
+    assert_eq!(ocean.subtitle_confirmation, "needs_review");
+    assert!(ocean.subtitle.is_none());
+    drop(c);
+    drop(s);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn lightweight_suggestions_match_the_full_search_ranking() {
+    let (dir, s, folder) = fixture();
+    for name in ["DEMO-101.mp4", "DEMO-102.mp4", "DEMO-103.mp4"] {
+        fs::write(Path::new(&folder).join(name), b"fixture").unwrap();
+    }
+    scanner::scan_root(&s, "root").unwrap();
+    let c = db(&s).unwrap();
+    c.execute("UPDATE items SET removed=1 WHERE code='DEMO-103'", []).unwrap();
+    for query in ["DEMO", "DEMO_102", "DEMO-10%", ""] {
+        let quick = catalog::suggestions(&c, query).unwrap();
+        if query.is_empty() {
+            assert!(quick.is_empty());
+            continue;
+        }
+        let page = catalog::list(&c, query, "", false, 0, 8, &Default::default()).unwrap();
+        let ids = serde_json::to_value(quick).unwrap();
+        assert_eq!(
+            ids.as_array().unwrap().iter().map(|entry| entry["id"].as_str().unwrap()).collect::<Vec<_>>(),
+            page.items.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+        );
+        assert!(ids.as_array().unwrap().iter().all(|entry| entry.as_object().unwrap().len() == 3));
+    }
+    drop(c);
+    drop(s);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 #[ignore = "performance baseline; run explicitly"]
 fn library_scale_baseline() {
     let mut rows = vec![];
@@ -369,7 +418,7 @@ fn migration_keeps_legacy_tag_links() {
     assert_eq!(
         c.query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        3
+        categories::SCHEMA_VERSION
     );
     assert_eq!(
         c.query_row(
@@ -386,7 +435,66 @@ fn migration_keeps_legacy_tag_links() {
             .unwrap(),
         5
     );
+    assert_eq!(
+        c.query_row("SELECT category_id FROM item_categories WHERE item_id='i'", [], |r| r.get::<_, String>(0)).unwrap(),
+        "jav"
+    );
     drop(c);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn classifications_inherit_on_scan_and_do_not_change_source_rules() {
+    let (dir, s, folder) = fixture();
+    {
+        let c = db(&s).unwrap();
+        assert_eq!(c.query_row("SELECT count(*) FROM categories", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        categories::save(&c, "shows", "演出").unwrap();
+        categories::save(&c, "local", "旅行").unwrap();
+        c.execute("INSERT INTO root_categories VALUES('root','shows')", []).unwrap();
+    }
+    fs::write(Path::new(&folder).join("JUFE-626.mp4"), b"fixture").unwrap();
+    assert_eq!(scanner::scan_root(&s, "root").unwrap(), 1);
+    let mut item = first(&s);
+    assert_eq!(item.category_id.as_deref(), Some("shows"));
+    assert_eq!(item.code, "JUFE-626");
+    item.category_id = Some("local".into());
+    {
+        let mut c = db(&s).unwrap();
+        catalog::save(&mut c, &item).unwrap();
+        categories::save(&c, "local", "珍藏").unwrap();
+        let filter = catalog::Filters { category_id: "local".into(), ..Default::default() };
+        assert_eq!(catalog::list(&c, "", "", false, 0, 60, &filter).unwrap().total, 1);
+        c.execute("DELETE FROM categories WHERE id='local'", []).unwrap();
+    }
+    assert_eq!(first(&s).media_type, "jav");
+    assert!(first(&s).category_id.is_none());
+    drop(s);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn restoring_schema_three_backup_recovers_classifications() {
+    let (dir, s, folder) = fixture();
+    fs::write(Path::new(&folder).join("a.mp4"), b"fixture").unwrap();
+    scanner::scan_root(&s, "root").unwrap();
+    let backup = dir.join("backup");
+    export_backup(&*db(&s).unwrap(), &s.data, &backup).unwrap();
+    {
+        let c = Connection::open(backup.join("library.db")).unwrap();
+        c.execute_batch("DROP TABLE item_categories; DROP TABLE root_categories; DROP TABLE categories;
+                         ALTER TABLE tag_meta DROP COLUMN pinned; PRAGMA user_version=3;").unwrap();
+    }
+    let manifest_path = backup.join("manifest.json");
+    let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["schemaVersion"] = 3.into();
+    manifest["databaseSha256"] = digest(&backup.join("library.db")).unwrap().into();
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    restore_impl(backup.to_str().unwrap(), &s).unwrap();
+    assert_eq!(first(&s).category_id.as_deref(), Some("jav"));
+    assert_eq!(first(&s).media_type, "jav");
+    assert_eq!(read_roots(&*db(&s).unwrap()).unwrap()[0].category_id.as_deref(), Some("jav"));
+    drop(s);
     fs::remove_dir_all(dir).unwrap();
 }
 
@@ -468,7 +576,7 @@ fn restore_rejects_incompatible_incomplete_and_broken_relations() {
         .unwrap();
     for sql in [
         "PRAGMA user_version=99",
-        "PRAGMA user_version=3;UPDATE items SET cover='absent.jpg'",
+        "PRAGMA user_version=4;UPDATE items SET cover='absent.jpg'",
         "PRAGMA foreign_keys=OFF;UPDATE items SET cover=NULL,root_id='absent-root'",
     ] {
         let input = Connection::open(backup.join("library.db")).unwrap();

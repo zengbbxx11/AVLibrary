@@ -6,6 +6,7 @@ export interface Item {
   title: string;
   code: string;
   mediaType: MediaType;
+  categoryId?: string | null;
   size: number;
   duration: number | null;
   rating: number | null;
@@ -34,6 +35,7 @@ export interface Root {
   id: string;
   path: string;
   mediaType: MediaType;
+  categoryId?: string | null;
   enabled: boolean;
   online: boolean;
   kind: string;
@@ -43,6 +45,9 @@ export interface Tag {
   id: string;
   name: string;
   groupId: string | null;
+  pinned?: boolean;
+  usageCount?: number;
+  totalUsageCount?: number;
 }
 export interface Provider {
   id: string;
@@ -68,12 +73,15 @@ export interface Entity {
   name: string;
   aliases?: string[];
   value?: Filters;
+  itemCount?: number;
+  rootCount?: number;
 }
 export interface Catalog {
   performers: Entity[];
   studios: Entity[];
   tag_groups: Entity[];
   saved_filters: Entity[];
+  categories?: Entity[];
 }
 export interface Filters {
   favorite?: boolean;
@@ -89,6 +97,7 @@ export interface Filters {
   durationMax?: number;
   unrated?: boolean;
   targetId?: string;
+  categoryId?: string;
 }
 export function normalizeFilters(value: Filters): Filters {
   const normalized = Object.fromEntries(
@@ -130,9 +139,9 @@ export interface Job {
   createdAt: number;
 }
 export const mediaNames: Record<MediaType, string> = {
-  jav: "日本影片",
-  western: "欧美影片",
-  personal: "个人片段",
+  jav: "日本影片来源（按番号匹配）",
+  western: "欧美影片来源（按标题与日期匹配）",
+  personal: "仅本地整理",
 };
 export function bytes(n: number) {
   return n >= 1073741824
@@ -143,6 +152,14 @@ export function minutes(n: number | null) {
   if (n == null || !Number.isFinite(n) || n <= 0) return "时长未知";
   const seconds = Math.max(1, Math.round(n));
   return seconds < 60 ? seconds + " 秒" : Math.floor(seconds / 60) + " 分钟";
+}
+export function playbackTime(duration: number | null) {
+  if (duration == null || !Number.isFinite(duration) || duration <= 0)
+    return "时长未知";
+  const seconds = Math.max(1, Math.round(duration));
+  const parts = [Math.floor(seconds / 60) % 60, seconds % 60];
+  if (seconds >= 3600) parts.unshift(Math.floor(seconds / 3600));
+  return parts.map((part) => String(part).padStart(2, "0")).join(":");
 }
 export const subtitleNames = {
   selected: "外挂字幕已关联",

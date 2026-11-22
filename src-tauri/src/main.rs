@@ -1,5 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 mod catalog;
+mod categories;
 mod diagnostics;
 mod media;
 mod metadata;
@@ -60,6 +61,7 @@ struct Root {
     id: String,
     path: String,
     media_type: String,
+    category_id: Option<String>,
     enabled: bool,
     online: bool,
     kind: String,
@@ -74,6 +76,8 @@ struct Item {
     title: String,
     code: String,
     media_type: String,
+    #[serde(default)]
+    category_id: Option<String>,
     size: i64,
     duration: Option<f64>,
     rating: Option<i64>,
@@ -96,12 +100,18 @@ struct Page {
     items: Vec<Item>,
     total: i64,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 struct Tag {
     id: String,
     name: String,
     #[serde(default, rename = "groupId")]
     group_id: Option<String>,
+    #[serde(default)]
+    pinned: bool,
+    #[serde(default, rename = "usageCount")]
+    usage_count: i64,
+    #[serde(default, rename = "totalUsageCount")]
+    total_usage_count: i64,
 }
 #[derive(Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -119,7 +129,7 @@ fn initialize(path: &Path) -> Result<Connection> {
     let version: i64 = c
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(err)?;
-    if version > 3 {
+    if version > categories::SCHEMA_VERSION {
         return Err("数据库来自更高版本，拒绝写入".into());
     }
     c.execute_batch("PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_mode=DELETE;
@@ -142,6 +152,13 @@ CREATE TABLE IF NOT EXISTS launches(id TEXT PRIMARY KEY,item_id TEXT NOT NULL,la
             .map_err(err)?;
     }
     catalog::migrate(&mut c, version)?;
+    if version == 3 && path != Path::new(":memory:") {
+        let mut output = Connection::open(path.with_extension(format!("pre-v4-{}.db", stamp()))).map_err(err)?;
+        let backup = rusqlite::backup::Backup::new(&c, &mut output).map_err(err)?;
+        backup.run_to_completion(32, std::time::Duration::from_millis(1), None).map_err(err)?;
+    }
+    categories::migrate(&mut c, version)?;
+    catalog::ensure_performance_indexes(&c)?;
     c.execute_batch("CREATE TABLE IF NOT EXISTS subtitle_versions(subtitle_id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL)").map_err(err)?;
     Ok(c)
 }
@@ -221,7 +238,7 @@ async fn roots(app: tauri::AppHandle) -> Result<Vec<Root>> {
 }
 fn read_roots(c: &Connection) -> Result<Vec<Root>> {
     let mut q = c
-        .prepare("SELECT r.id,r.path,r.media_type,r.enabled,coalesce(m.kind,'video'),coalesce(m.detached,0) FROM roots r LEFT JOIN root_meta m ON m.root_id=r.id")
+        .prepare("SELECT r.id,r.path,r.media_type,r.enabled,coalesce(m.kind,'video'),coalesce(m.detached,0),rc.category_id FROM roots r LEFT JOIN root_meta m ON m.root_id=r.id LEFT JOIN root_categories rc ON rc.root_id=r.id")
         .map_err(err)?;
     let rows = q
         .query_map([], |r| {
@@ -234,6 +251,7 @@ fn read_roots(c: &Connection) -> Result<Vec<Root>> {
                 enabled: r.get(3)?,
                 kind: r.get(4)?,
                 detached: r.get(5)?,
+                category_id: r.get(6)?,
             })
         })
         .map_err(err)?
@@ -242,7 +260,7 @@ fn read_roots(c: &Connection) -> Result<Vec<Root>> {
     Ok(rows)
 }
 #[tauri::command]
-fn add_root(path: String, media_type: String, kind:Option<String>, s: State<AppState>) -> Result<String> {
+fn add_root(path: String, media_type: String, kind:Option<String>, category_id: Option<String>, new_category: Option<String>, s: State<AppState>) -> Result<String> {
     let kind=kind.unwrap_or_else(||"video".into());
     if !["video","subtitle"].contains(&kind.as_str()){return Err("目录用途无效".into());}
     kind_ok(&media_type)?;
@@ -271,6 +289,18 @@ fn add_root(path: String, media_type: String, kind:Option<String>, s: State<AppS
     let key=id();let tx=c.transaction().map_err(err)?;
     tx.execute("INSERT INTO roots(id,path,media_type) VALUES(?1,?2,?3)",params![key,p.to_string_lossy(),media_type]).map_err(err)?;
     tx.execute("INSERT INTO root_meta(root_id,kind) VALUES(?1,?2)",params![key,kind]).map_err(err)?;
+    if kind == "video" {
+        let category = if let Some(name) = new_category {
+            let category = id();
+            categories::save(&tx, &category, &name)?;
+            Some(category)
+        } else {
+            category_id.filter(|category| !category.is_empty())
+        };
+        if let Some(category) = category {
+            tx.execute("INSERT INTO root_categories VALUES(?1,?2)",params![key,category]).map_err(err)?;
+        }
+    }
     tx.commit().map_err(err)?;
     Ok(key)
 }
@@ -308,11 +338,8 @@ fn walk(p: &Path, out: &mut Vec<PathBuf>, cancel: &AtomicBool) -> Result<()> {
         #[cfg(windows)]
         {
             use std::os::windows::fs::MetadataExt;
-            if fs::symlink_metadata(entry.path())
-                .map_err(err)?
-                .file_attributes()
-                & 0x400
-                != 0
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT;
+            if entry.metadata().map_err(err)?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
             {
                 continue;
             }
@@ -323,7 +350,10 @@ fn walk(p: &Path, out: &mut Vec<PathBuf>, cancel: &AtomicBool) -> Result<()> {
         if ty.is_dir() {
             walk(&entry.path(), out, cancel)?
         } else if ty.is_file() {
-            out.push(entry.path())
+            let path = entry.path();
+            if is_video(&path) || is_sub(&path) {
+                out.push(path);
+            }
         }
     }
     Ok(())
@@ -351,15 +381,18 @@ async fn list_items(
     app: tauri::AppHandle,
 ) -> Result<Page> {
     tauri::async_runtime::spawn_blocking(move || {
-        catalog::list(
-            &*db(&app.state::<AppState>())?,
-            &query,
-            &media_type,
-            removed,
-            offset,
-            limit,
-            &filters.unwrap_or_default(),
-        )
+        let s = app.state::<AppState>();
+        let page = {
+            let connection = db(&s)?;
+            catalog::read_page(&connection, &query, &media_type, removed, offset, limit, &filters.unwrap_or_default())?
+        };
+        Ok(page.into_page())
+    }).await.map_err(err)?
+}
+#[tauri::command]
+async fn search_suggestions(query: String, app: tauri::AppHandle) -> Result<Vec<catalog::SearchSuggestion>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        catalog::suggestions(&*db(&app.state::<AppState>())?, &query)
     }).await.map_err(err)?
 }
 #[tauri::command]
@@ -382,10 +415,19 @@ fn set_removed(ids: Vec<String>, removed: bool, s: State<AppState>) -> Result<()
     Ok(())
 }
 #[tauri::command]
-fn tags(s: State<AppState>) -> Result<Vec<Tag>> {
-    let c = db(&s)?;
+async fn tags(app: tauri::AppHandle) -> Result<Vec<Tag>> {
+    tauri::async_runtime::spawn_blocking(move || read_tags(&*db(&app.state::<AppState>())?))
+        .await
+        .map_err(err)?
+}
+
+fn read_tags(c: &Connection) -> Result<Vec<Tag>> {
     let mut q = c
-        .prepare("SELECT t.id,t.name,m.group_id FROM tags t LEFT JOIN tag_meta m ON m.tag_id=t.id ORDER BY name")
+        .prepare_cached("SELECT t.id,t.name,m.group_id,coalesce(m.pinned,0),coalesce(usage.visible,0),coalesce(usage.total,0)
+                  FROM tags t LEFT JOIN tag_meta m ON m.tag_id=t.id
+                  LEFT JOIN (SELECT it.tag_id,count(*) AS total,sum(i.removed=0 AND i.merged_into IS NULL) AS visible
+                    FROM item_tags it JOIN items i ON i.id=it.item_id GROUP BY it.tag_id) usage ON usage.tag_id=t.id
+                  ORDER BY t.name COLLATE NOCASE")
         .map_err(err)?;
     let rows = q
         .query_map([], |r| {
@@ -393,6 +435,9 @@ fn tags(s: State<AppState>) -> Result<Vec<Tag>> {
                 id: r.get(0)?,
                 name: r.get(1)?,
                 group_id: r.get(2)?,
+                pinned: r.get(3)?,
+                usage_count: r.get(4)?,
+                total_usage_count: r.get(5)?,
             })
         })
         .map_err(err)?
@@ -433,6 +478,31 @@ fn delete_tag(tag_id: String, s: State<AppState>) -> Result<()> {
         .map_err(err)?;
     tx.commit().map_err(err)?;
     Ok(())
+}
+#[tauri::command]
+fn pin_tag(tag_id: String, pinned: bool, s: State<AppState>) -> Result<()> {
+    db(&s)?.execute(
+        "INSERT INTO tag_meta(tag_id,pinned) VALUES(?1,?2) ON CONFLICT(tag_id) DO UPDATE SET pinned=excluded.pinned",
+        params![tag_id,pinned],
+    ).map_err(err)?;
+    Ok(())
+}
+#[tauri::command]
+fn organize_tags(tag_ids: Vec<String>, group_id: Option<String>, remove_unused: bool, s: State<AppState>) -> Result<()> {
+    let mut c = db(&s)?;
+    let tx = c.transaction().map_err(err)?;
+    for tag in tag_ids {
+        if remove_unused {
+            if tx.query_row("SELECT EXISTS(SELECT 1 FROM item_tags WHERE tag_id=?1)", [&tag], |r| r.get::<_, bool>(0)).map_err(err)? {
+                return Err("有选中的标签正在使用，请刷新后重新选择".into());
+            }
+            tx.execute("DELETE FROM tag_meta WHERE tag_id=?1", [&tag]).map_err(err)?;
+            tx.execute("DELETE FROM tags WHERE id=?1", [&tag]).map_err(err)?;
+        } else {
+            catalog::assign_tag_group(&tx, &tag, group_id.as_deref())?;
+        }
+    }
+    tx.commit().map_err(err)
 }
 #[tauri::command]
 fn get_settings(s: State<AppState>) -> Result<Settings> {
@@ -903,12 +973,19 @@ fn validate_backup_database(
     c: &Connection,
     covers: &Path,
     names: &std::collections::HashSet<String>,
+    expected_version: i64,
 ) -> Result<()> {
     let version: i64 = c
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(err)?;
-    if version != 3 {
+    if version != expected_version {
         return Err("备份数据库实际版本不兼容".into());
+    }
+    if version == categories::SCHEMA_VERSION {
+        c.prepare("SELECT c.name,rc.root_id,ic.item_id,tm.pinned FROM categories c
+                   LEFT JOIN root_categories rc ON rc.category_id=c.id
+                   LEFT JOIN item_categories ic ON ic.category_id=c.id
+                   LEFT JOIN tag_meta tm ON 0 LIMIT 0").map_err(err)?;
     }
     let integrity: String = c
         .query_row("PRAGMA integrity_check", [], |r| r.get(0))
@@ -963,9 +1040,9 @@ fn export_backup(c: &Connection, data: &Path, dest: &Path) -> Result<()> {
         .iter()
         .filter_map(|f: &serde_json::Value| f["name"].as_str().map(str::to_owned))
         .collect();
-    validate_backup_database(&output, &tmp.join("covers"), &names)?;
+    validate_backup_database(&output, &tmp.join("covers"), &names, categories::SCHEMA_VERSION)?;
     drop(output);
-    fs::write(tmp.join("manifest.json"),serde_json::to_vec_pretty(&serde_json::json!({"formatVersion":1,"schemaVersion":3,"createdAt":stamp(),"databaseSha256":digest(&tmp.join("library.db"))?,"covers":files,"externalMediaIncluded":false})).map_err(err)?).map_err(err)?;
+    fs::write(tmp.join("manifest.json"),serde_json::to_vec_pretty(&serde_json::json!({"formatVersion":1,"schemaVersion":categories::SCHEMA_VERSION,"createdAt":stamp(),"databaseSha256":digest(&tmp.join("library.db"))?,"covers":files,"externalMediaIncluded":false})).map_err(err)?).map_err(err)?;
     fs::rename(tmp, dest).map_err(err)?;
     Ok(())
 }
@@ -1026,7 +1103,8 @@ fn restore_impl(path: &str, s: &AppState) -> Result<()> {
     let manifest: serde_json::Value =
         serde_json::from_slice(&fs::read(source.join("manifest.json")).map_err(err)?)
             .map_err(err)?;
-    if manifest["formatVersion"] != 1 || manifest["schemaVersion"] != 3 {
+    let version = manifest["schemaVersion"].as_i64().unwrap_or_default();
+    if manifest["formatVersion"] != 1 || !(3..=categories::SCHEMA_VERSION).contains(&version) {
         return Err("备份版本不兼容".into());
     }
     let mut staging = RestoreFiles::default();
@@ -1050,8 +1128,10 @@ fn restore_impl(path: &str, s: &AppState) -> Result<()> {
         }
         assets.push((input, s.data.join("covers").join(name), expected));
     }
-    let input = Connection::open(&staged_database).map_err(err)?;
-    validate_backup_database(&input, &source.join("covers"), &names)?;
+    let mut input = Connection::open(&staged_database).map_err(err)?;
+    validate_backup_database(&input, &source.join("covers"), &names, version)?;
+    categories::migrate(&mut input, version)?;
+    catalog::ensure_performance_indexes(&input)?;
     input.execute_batch("CREATE TABLE IF NOT EXISTS subtitle_versions(subtitle_id TEXT PRIMARY KEY,fingerprint TEXT NOT NULL)").map_err(err)?;
     input.execute(
         "UPDATE jobs SET state='interrupted',updated_at=?1 WHERE state IN('queued','running')",
@@ -1202,12 +1282,18 @@ fn main() {
             scan,
             cancel_scan,
             list_items,
+            search_suggestions,
             catalog::selected_items,
             save_item,
             set_removed,
             tags,
             save_tag,
             delete_tag,
+            pin_tag,
+            organize_tags,
+            categories::save_category,
+            categories::delete_category,
+            categories::set_root_category,
             get_settings,
             save_settings,
             bind_subtitle,
@@ -1278,13 +1364,13 @@ mod tests {
     fn tags_keep_group_and_links_and_validate_before_commit(){
       let mut c=initialize(Path::new(":memory:")).unwrap();
       c.execute_batch("INSERT INTO tag_groups VALUES('g','主题');INSERT INTO roots VALUES('r','x','personal',1);INSERT INTO items(id,root_id,path,title,media_type,size,added_at) VALUES('i','r','x','样本','personal',1,1);").unwrap();
-      let mut tag=Tag{id:"t".into(),name:"  自定义  ".into(),group_id:Some("g".into())};
+      let mut tag=Tag{id:"t".into(),name:"  自定义  ".into(),group_id:Some("g".into()),..Default::default()};
       save_tag_impl(&mut c,&tag).unwrap();
       c.execute("INSERT INTO item_tags VALUES('i','t')",[]).unwrap();
       tag.name="改名".into();save_tag_impl(&mut c,&tag).unwrap();
       assert_eq!(c.query_row("SELECT group_id FROM tag_meta WHERE tag_id='t'",[],|r|r.get::<_,String>(0)).unwrap(),"g");
       assert_eq!(c.query_row("SELECT count(*) FROM item_tags WHERE tag_id='t'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
-      let duplicate=Tag{id:"d".into(),name:"改名".into(),group_id:None};assert!(save_tag_impl(&mut c,&duplicate).is_err());
+      let duplicate=Tag{id:"d".into(),name:"改名".into(),group_id:None,..Default::default()};assert!(save_tag_impl(&mut c,&duplicate).is_err());
       tag.name="不得写入".into();tag.group_id=Some("missing".into());assert!(save_tag_impl(&mut c,&tag).is_err());
       assert_eq!(c.query_row("SELECT name FROM tags WHERE id='t'",[],|r|r.get::<_,String>(0)).unwrap(),"改名");
       tag.name=" ".into();assert!(save_tag_impl(&mut c,&tag).is_err());

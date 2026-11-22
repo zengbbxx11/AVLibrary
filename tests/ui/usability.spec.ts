@@ -14,6 +14,7 @@ async function fixture(page: Page) {
       title: "测试影片",
       code: "TEST-001",
       mediaType: "personal",
+      categoryId: "personal",
       size: 100,
       duration: 60,
       rating: 4,
@@ -40,6 +41,10 @@ async function fixture(page: Page) {
     };
     const tags: any[] = [];
     const groups = [{ id: "g", name: "主题" }];
+    const categories = [
+      { id: "personal", name: "个人片段" },
+      { id: "western", name: "欧美影片" },
+    ];
     const w = window as any;
     w.isTauri = true;
     w.calls = [];
@@ -94,6 +99,8 @@ async function fixture(page: Page) {
             });
           return;
         }
+        if (cmd === "search_suggestions")
+          return [{ id: item.id, title: item.title, code: item.code }];
         if (cmd === "list_items") {
           if (w.failList) throw "测试资料读取失败";
           if (w.scopeLibrary) {
@@ -105,6 +112,8 @@ async function fixture(page: Page) {
             const matches =
               !args.removed &&
               (!args.mediaType || args.mediaType === item.mediaType) &&
+              (!args.filters.categoryId ||
+                args.filters.categoryId === item.categoryId) &&
               (!args.query || item.code.includes(args.query));
             return { items: matches ? [item] : [], total: matches ? 1 : 0 };
           }
@@ -126,6 +135,7 @@ async function fixture(page: Page) {
               ...item,
               id: "film" + n,
               title: "测试影片 " + n,
+              cover: w.previewCovers ? "cover-" + n + ".jpg" : item.cover,
             }));
             return {
               items: rows.slice(args.offset, args.offset + args.limit),
@@ -166,7 +176,12 @@ async function fixture(page: Page) {
               available: true,
             })),
           };
-        if (cmd === "tags") return structuredClone(tags);
+        if (cmd === "tags")
+          return tags.map((tag) => ({
+            ...structuredClone(tag),
+            usageCount: item.tags.includes(tag.id) && !item.removed ? 1 : 0,
+            totalUsageCount: item.tags.includes(tag.id) ? 1 : 0,
+          }));
         if (cmd === "roots")
           return [
             {
@@ -186,6 +201,7 @@ async function fixture(page: Page) {
               studios: [],
               tag_groups: groups,
               saved_filters: [],
+              categories,
             }
           );
         if (cmd === "system_status")
@@ -233,7 +249,30 @@ async function fixture(page: Page) {
             throw "同名标签已存在";
           const old = tags.find((t) => t.id === args.tag.id);
           if (old) Object.assign(old, args.tag);
-          else tags.push(args.tag);
+          else
+            tags.push({
+              ...args.tag,
+              pinned: false,
+              usageCount: 0,
+              totalUsageCount: 0,
+            });
+          return;
+        }
+        if (cmd === "pin_tag") {
+          const tag = tags.find((t) => t.id === args.tagId);
+          if (tag) tag.pinned = args.pinned;
+          return;
+        }
+        if (cmd === "delete_tag") {
+          const index = tags.findIndex((tag) => tag.id === args.tagId);
+          if (index !== -1) tags.splice(index, 1);
+          item.tags = item.tags.filter((tagId) => tagId !== args.tagId);
+          return;
+        }
+        if (cmd === "save_category") {
+          const category = categories.find((entry) => entry.id === args.key);
+          if (category) category.name = args.name;
+          else categories.push({ id: args.key, name: args.name });
           return;
         }
         if (cmd === "scan")
@@ -284,14 +323,18 @@ test("tag manager has inline validation, groups and prevents duplicate requests"
   page,
 }) => {
   await fixture(page);
-  await page.getByRole("button", { name: "管理标签", exact: true }).click();
+  await page.getByRole("button", { name: "标签管理", exact: true }).click();
   const modal = page.getByRole("dialog", { name: "标签管理" });
+  const search = modal.getByRole("textbox", { name: "搜索标签" });
+  await expect(search).toBeFocused();
   await modal.getByRole("button", { name: "新增标签", exact: true }).click();
   await expect(
     modal.getByRole("button", { name: "保存标签", exact: true }),
   ).toBeDisabled();
   await modal.getByLabel("名称", { exact: true }).fill("自定义");
-  await modal.getByLabel("标签分类", { exact: true }).selectOption("g");
+  const group = modal.getByRole("combobox", { name: "标签分组", exact: true });
+  await group.click();
+  await modal.getByRole("option", { name: "主题", exact: true }).click();
   await page.evaluate(() => {
     (window as any).failTag = true;
   });
@@ -314,14 +357,31 @@ test("tag manager has inline validation, groups and prevents duplicate requests"
         (window as any).calls.filter((c: any) => c.cmd === "save_tag").length,
     ),
   ).toBe(2);
-  await modal.getByRole("button", { name: "编辑", exact: true }).click();
-  await expect(modal.getByLabel("标签分类", { exact: true })).toHaveValue("g");
+  await search.fill("自定义");
+  const edit = modal.getByRole("button", { name: "编辑 自定义", exact: true });
+  const menu = modal.getByRole("button", { name: "管理 自定义", exact: true });
+  await menu.click();
+  await edit.click();
+  await expect(modal.getByLabel("名称", { exact: true })).toBeFocused();
+  await expect(group).toContainText("主题");
   await modal.getByRole("button", { name: "取消编辑", exact: true }).click();
-  await modal.getByRole("button", { name: "删除 自定义", exact: true }).click();
-  await page
-    .getByRole("dialog", { name: "删除管理项目" })
-    .getByRole("button", { name: "取消", exact: true })
+  await expect(menu).toBeFocused();
+  await menu.click();
+  await edit.click();
+  await modal.getByLabel("名称", { exact: true }).fill("重命名标签");
+  await modal.getByRole("button", { name: "保存标签", exact: true }).click();
+  await expect(modal.getByText("重命名标签", { exact: true })).toBeVisible();
+  await expect(search).toHaveValue("");
+  const renamedMenu = modal.getByRole("button", {
+    name: "管理 重命名标签",
+    exact: true,
+  });
+  await renamedMenu.click();
+  await modal
+    .getByRole("button", { name: "删除 重命名标签", exact: true })
     .click();
+  const remove = page.getByRole("dialog", { name: "删除标签" });
+  await remove.getByRole("button", { name: "取消", exact: true }).click();
   expect(
     await page.evaluate(() =>
       (window as any).calls.some((c: any) => c.cmd === "delete_tag"),
@@ -331,6 +391,12 @@ test("tag manager has inline validation, groups and prevents duplicate requests"
     path: ".qa/ui/tags-manager.png",
     fullPage: true,
   });
+  await renamedMenu.click();
+  await modal
+    .getByRole("button", { name: "删除 重命名标签", exact: true })
+    .click();
+  await remove.getByRole("button", { name: "确认删除" }).click();
+  await expect(modal.getByText("重命名标签", { exact: true })).toHaveCount(0);
 });
 test("editor cancel keeps draft; failed save keeps draft; discard requires explicit confirmation", async ({
   page,
@@ -386,14 +452,15 @@ test("filter drafts cancel, validate then apply and sorting preferences survive 
   await expect(filter).toHaveCount(0);
   await page.getByRole("combobox", { name: "影片排序" }).click();
   await page.getByRole("option", { name: "评分从高到低" }).click();
-  await page.getByRole("combobox", { name: "卡片大小" }).click();
-  await page.getByRole("option", { name: "小", exact: true }).click();
+  const size = page.getByRole("group", { name: "卡片大小" });
+  await size.getByRole("button", { name: "小" }).click();
   await page.reload();
   await expect(page.getByRole("combobox", { name: "影片排序" })).toContainText(
     "评分从高到低",
   );
-  await expect(page.getByRole("combobox", { name: "卡片大小" })).toContainText(
-    "小",
+  await expect(size.getByRole("button", { name: "小" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
   );
   expect(
     await page.evaluate(() =>
@@ -409,10 +476,11 @@ test("filter drafts cancel, validate then apply and sorting preferences survive 
     ),
   );
   await page.reload();
-  const size = page.getByRole("combobox", { name: "卡片大小" });
-  await expect(size).toContainText("中");
-  await size.click();
-  await expect(page.getByRole("option")).toHaveText(["小", "中"]);
+  await expect(size.getByRole("button", { name: "中" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(size.getByRole("button")).toHaveText(["中", "小"]);
 });
 test("modal keyboard focus is trapped, Escape protects settings and focus returns to opener", async ({
   page,
@@ -516,6 +584,34 @@ test("folder purpose is saved atomically and cancelled backup never reports succ
     .click();
   await expect(page.getByText("备份资料完成", { exact: true })).toHaveCount(0);
 });
+test("video folder can create a category while retaining local-only defaults", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.evaluate(() => ((window as any).picker = "D:/videos"));
+  await page.getByRole("button", { name: "添加文件夹", exact: true }).click();
+  const folder = page.getByRole("dialog", { name: "添加文件夹" });
+  await expect(
+    folder.getByRole("combobox", { name: "资料来源", exact: true }),
+  ).toHaveValue("personal");
+  await folder.getByLabel("新入库视频的默认分类").selectOption("__new");
+  await folder.getByLabel("新分类名称").fill("演出");
+  await folder
+    .getByRole("button", { name: "添加并在后台核对", exact: true })
+    .click();
+  await expect(folder).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () => (window as any).calls.find((c: any) => c.cmd === "add_root").args,
+    ),
+  ).toEqual({
+    kind: "video",
+    path: "D:/videos",
+    mediaType: "personal",
+    newCategory: "演出",
+  });
+});
+
 test("secondary editor task saves draft first and resumes safely", async ({
   page,
 }) => {
@@ -751,9 +847,45 @@ test("search debounces main requests and reuses auxiliary catalog", async ({
       ["roots", "tags", "catalog", "jobs"].includes(c.cmd),
     ),
   ).toHaveLength(0);
+  expect(calls.filter((c: any) => c.cmd === "list_items").length).toBe(1);
   expect(
-    calls.filter((c: any) => c.cmd === "list_items").length,
-  ).toBeLessThanOrEqual(2);
+    calls
+      .filter((c: any) => c.cmd === "search_suggestions")
+      .map((c: any) => c.args.query),
+  ).toEqual(["ABC"]);
+});
+
+test("cover work is deferred until its card approaches the viewport", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.setViewportSize({ width: 960, height: 640 });
+  await page.evaluate(() => {
+    const state = window as any;
+    state.largeLibrary = true;
+    state.previewCovers = true;
+    const invoke = state.__TAURI_INTERNALS__.invoke;
+    state.__TAURI_INTERNALS__.invoke = (cmd: string, args: unknown) => {
+      if (cmd === "cover_path") {
+        state.calls.push({ cmd, args });
+        return Promise.reject("fixture has no on-disk cover");
+      }
+      return invoke(cmd, args);
+    };
+  });
+  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  const requests = () =>
+    page.evaluate(() =>
+      (window as any).calls
+        .filter((call: any) => call.cmd === "cover_path")
+        .map((call: any) => call.args.name),
+    );
+  await expect.poll(requests).toContain("cover-0.jpg");
+  expect(await requests()).not.toContain("cover-59.jpg");
+  await page
+    .getByRole("article", { name: "测试影片 59", exact: true })
+    .scrollIntoViewIfNeeded();
+  await expect.poll(requests).toContain("cover-59.jpg");
 });
 test("task scopes and historical pages are sent to backend", async ({
   page,
@@ -914,7 +1046,7 @@ test("removing final item on last page returns to valid page", async ({
     .poll(() => page.evaluate(() => window.scrollY))
     .toBeGreaterThan(0);
   await nextPage.press("Enter");
-  await expect(page.getByRole("heading", { name: "影片资料库" })).toBeFocused();
+  await expect(page.getByRole("heading", { name: "全部影片" })).toBeFocused();
   await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(0);
   await expect(
     page.getByRole("navigation", { name: "资料库分页" }),
@@ -974,7 +1106,7 @@ test("empty search in removed items clears the search and returns to all films",
     page.getByRole("heading", { name: "没有找到匹配的移出项目" }),
   ).toBeVisible();
   await page.getByRole("button", { name: "查看全部影片" }).click();
-  await expect(page.getByRole("heading", { name: "影片资料库" })).toBeFocused();
+  await expect(page.getByRole("heading", { name: "全部影片" })).toBeFocused();
   await expect(search).toHaveValue("");
   await expect(page.getByRole("heading", { name: "测试影片" })).toBeVisible();
 });
@@ -1031,6 +1163,37 @@ test("subtitle cards distinguish available, unverified and broken subtitles", as
     "字幕文件已变化",
   );
 });
+
+test("medium and small cards show actor names and media information without a studio fallback", async ({
+  page,
+}) => {
+  await fixture(page);
+  const card = page.getByRole("article", { name: "测试影片" });
+  const size = page.getByRole("group", { name: "卡片大小" });
+  await page.evaluate(() => {
+    Object.assign((window as any).item, {
+      performers: ["林青", "陈远"],
+      studio: "岸线影像",
+      size: 1530929152,
+    });
+  });
+  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  for (const name of ["中", "小"]) {
+    await size.getByRole("button", { name, exact: true }).click();
+    for (const text of ["林青 / 陈远", "01:00", "1.43 GB", "320×180"]) {
+      await expect(card.getByText(text, { exact: true })).toBeVisible();
+    }
+    await expect(card.getByText("岸线影像")).toHaveCount(0);
+  }
+  await card.getByRole("button", { name: "测试影片", exact: true }).click();
+  const detail = page.getByRole("dialog", { name: "测试影片" });
+  await expect(detail.getByText("岸线影像")).toBeVisible();
+  await detail.getByRole("button", { name: "关闭窗口" }).click();
+  await page.evaluate(() => ((window as any).item.performers = []));
+  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  await expect(card.locator(".people-line")).toHaveCount(0);
+  await expect(card.getByText("岸线影像")).toHaveCount(0);
+});
 test("subtitle candidates beyond first page are accessible and unbinding is explicit", async ({
   page,
 }) => {
@@ -1072,6 +1235,7 @@ test("details, detected player and test playback form an accessible flow", async
   await page
     .getByRole("button", { name: "播放器与资料来源", exact: true })
     .click();
+  await page.getByText("本机环境与数据目录", { exact: true }).click();
   await page.getByRole("button", { name: "使用 vlc", exact: true }).click();
   await expect(page.getByLabel("播放器程序（.exe，可选）")).toHaveValue(
     "D:/fixture/vlc.exe",
@@ -1245,17 +1409,17 @@ test("relocation preview failure is visible and never sends confirmation", async
   ).toBe(0);
 });
 
-test("tag management and people management have separate clear entry points", async ({
+test("tags have a separate entry, and their name opens the associated films", async ({
   page,
 }) => {
   await fixture(page);
-  await page.getByRole("button", { name: "管理标签", exact: true }).click();
+  await page.getByRole("button", { name: "标签管理", exact: true }).click();
   const tags = page.getByRole("dialog", { name: "标签管理" });
   await expect(
     tags.getByRole("button", { name: "新增标签", exact: true }),
   ).toBeVisible();
   await expect(
-    tags.getByRole("button", { name: "标签分类", exact: true }),
+    tags.getByRole("button", { name: "分组管理", exact: true }),
   ).toBeVisible();
   await expect(
     tags.getByRole("button", { name: "演员", exact: true }),
@@ -1264,17 +1428,55 @@ test("tag management and people management have separate clear entry points", as
   await tags.getByLabel("名称", { exact: true }).fill("回归标签");
   await tags.getByRole("button", { name: "保存标签", exact: true }).click();
   await expect(tags.getByText("回归标签", { exact: true })).toBeVisible();
+  await tags.getByRole("checkbox", { name: "选择 回归标签" }).check();
+  await tags.getByRole("button", { name: "固定到侧栏" }).click();
+  await expect(tags.getByRole("button", { name: "取消固定" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await page.evaluate(() => {
+    const fixture = window as any;
+    fixture.item.tags = [
+      fixture.calls.find((c: any) => c.cmd === "save_tag").args.tag.id,
+    ];
+  });
   await tags.getByRole("button", { name: "关闭窗口" }).click();
-  await page.getByRole("button", { name: "演员与厂商", exact: true }).click();
-  const people = page.getByRole("dialog", { name: "演员与厂商" });
+  await page.getByRole("button", { name: "标签管理", exact: true }).click();
+  await tags
+    .getByRole("button", { name: "查看「回归标签」的 1 部影片" })
+    .click();
+  await expect(tags).toHaveCount(0);
+  await expect(page.locator(".filter-summary")).toContainText("回归标签");
+  await page.getByRole("button", { name: "返回标签管理" }).click();
   await expect(
-    people.getByRole("button", { name: "新增演员", exact: true }),
+    tags.getByRole("button", { name: "查看「回归标签」的 1 部影片" }),
+  ).toBeFocused();
+  await tags.getByRole("button", { name: "关闭窗口" }).click();
+  await page.getByRole("button", { name: "分类管理", exact: true }).click();
+  const management = page.getByRole("dialog", { name: "分类管理" });
+  await expect(
+    management.getByRole("button", { name: "全部标签", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    management.getByRole("button", { name: "演员", exact: true }),
+  ).toHaveCount(0);
+  await management
+    .getByRole("button", { name: "新增分类", exact: true })
+    .click();
+  await management.getByLabel("名称", { exact: true }).fill("旅行");
+  await management
+    .getByRole("button", { name: "保存项目", exact: true })
+    .click();
+  await expect(management.getByText("旅行", { exact: true })).toBeVisible();
+  await management.getByRole("button", { name: "关闭窗口" }).click();
+  await expect(
+    page.getByRole("button", { name: "旅行", exact: true }),
   ).toBeVisible();
   await expect(
-    people.getByRole("button", { name: "厂商", exact: true }),
+    page.getByRole("button", { name: "回归标签", exact: true }),
   ).toBeVisible();
   await expect(
-    people.getByRole("button", { name: "标签", exact: true }),
+    page.getByRole("button", { name: "演员与厂商", exact: true }),
   ).toHaveCount(0);
 });
 test("window controls call the native window and close preserves unsaved edits", async ({
@@ -1367,6 +1569,124 @@ test("compact menus support keyboard selection and escape; search has a single f
   });
 });
 
+test("group selectors and row actions fit beside the dialog edges", async ({
+  page,
+}) => {
+  const longGroup = "连续标签".repeat(20);
+  await fixture(page);
+  await page.setViewportSize({ width: 960, height: 640 });
+  await page.evaluate((name) => {
+    const state = window as any;
+    state.catalogOverride = {
+      performers: [],
+      studios: [],
+      categories: [],
+      saved_filters: [],
+      tag_groups: [
+        ...Array.from({ length: 14 }, (_, index) => ({
+          id: "group-" + index,
+          name: "测试分组 " + index,
+        })),
+        { id: "long", name },
+      ],
+    };
+  }, longGroup);
+  await page.getByRole("button", { name: "标签管理", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "标签管理" });
+  const filter = dialog.getByRole("combobox", { name: "按标签分组筛选" });
+  await filter.press("ArrowDown");
+  const popup = dialog.getByRole("listbox");
+  const box = await popup.boundingBox();
+  const frame = await dialog.boundingBox();
+  expect(box!.x).toBeGreaterThanOrEqual(frame!.x);
+  expect(box!.x + box!.width).toBeLessThanOrEqual(frame!.x + frame!.width);
+  await page.setViewportSize({ width: 800, height: 480 });
+  await expect
+    .poll(async () => {
+      const box = await popup.boundingBox();
+      return (
+        box &&
+        box.x >= 0 &&
+        box.x + box.width <= 800 &&
+        box.y >= 40 &&
+        box.y + box.height <= 480
+      );
+    })
+    .toBe(true);
+  await filter.press("End");
+  await expect(
+    dialog.getByRole("option", { name: longGroup }),
+  ).toBeInViewport();
+  await filter.press("Enter");
+  await expect(filter).toContainText(longGroup);
+  await expect(popup).toHaveCount(0);
+  await dialog.getByRole("button", { name: "新增标签" }).click();
+  await dialog
+    .getByRole("textbox", { name: "名称", exact: true })
+    .fill("测试标签");
+  await dialog.getByRole("button", { name: "保存标签" }).click();
+  const actions = dialog.getByRole("button", { name: "管理 测试标签" });
+  await actions.click();
+  const remove = dialog.getByRole("button", { name: "删除 测试标签" });
+  const visible = await remove.evaluate((button) => {
+    const r = button.getBoundingClientRect();
+    const target = document.elementFromPoint(
+      r.x + r.width / 2,
+      r.y + r.height / 2,
+    );
+    return button.contains(target);
+  });
+  expect(visible).toBe(true);
+  await actions.press("Escape");
+  await expect(dialog).toBeVisible();
+  await expect(remove).toHaveCount(0);
+});
+
+test("small cards wrap long film titles and full actor credits", async ({
+  page,
+}) => {
+  await fixture(page);
+  const title = "完整影片标题".repeat(10);
+  const names = [
+    "林青",
+    "陈远",
+    "周山",
+    "谢禾",
+    "宋云",
+    "沈言",
+    "路英",
+    "江海",
+    "何宁",
+    "郑溪",
+  ];
+  await page.setViewportSize({ width: 960, height: 640 });
+  await page.evaluate(
+    ({ title, names }) => {
+      Object.assign((window as any).item, { title, performers: names });
+    },
+    { title, names },
+  );
+  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  await page
+    .getByRole("group", { name: "卡片大小" })
+    .getByRole("button", { name: "小", exact: true })
+    .click();
+  const card = page.getByRole("article", { name: title, exact: true });
+  for (const text of [
+    card.getByRole("button", { name: title, exact: true }),
+    card.getByText(names.join(" / "), { exact: true }),
+  ]) {
+    await expect(text).toBeVisible();
+    expect(
+      await text.evaluate(
+        (element) =>
+          element.scrollWidth <= element.clientWidth + 1 &&
+          element.scrollHeight <= element.clientHeight + 1,
+      ),
+    ).toBe(true);
+  }
+});
+
 test("composing search text does not submit and suggestions return focus on Escape", async ({
   page,
 }) => {
@@ -1379,7 +1699,9 @@ test("composing search text does not submit and suggestions return focus on Esca
   await page.waitForTimeout(300);
   const submitted = await page.evaluate(() =>
     (window as any).calls.some(
-      (call: any) => call.cmd === "list_items" && call.args.query === "ceshi",
+      (call: any) =>
+        ["list_items", "search_suggestions"].includes(call.cmd) &&
+        call.args.query === "ceshi",
     ),
   );
   expect(submitted).toBe(false);
@@ -1427,7 +1749,7 @@ test("locating a result outside the current scope waits for its card to render",
   await page.getByRole("button", { name: "欧美影片", exact: true }).click();
   const search = page.getByRole("textbox", { name: "搜索影片" });
   const suggestion = page.locator("#search-suggestions button");
-  const title = page.getByRole("heading", { name: "影片资料库" });
+  const title = page.getByRole("heading", { name: "全部影片" });
   const card = page.getByRole("article", { name: "测试影片" });
 
   async function locateResult() {
@@ -1549,11 +1871,12 @@ test("large tag facet can search and apply a specific tag", async ({
     .toBe(true);
 });
 
-test("actor and studio facets show their names in applied filters", async ({
+test("actors work as browsing shortcuts and the studio facet is absent", async ({
   page,
 }) => {
   await fixture(page);
   await page.evaluate(() => {
+    (window as any).item.performers = ["测试演员"];
     (window as any).catalogOverride = {
       performers: [{ id: "p1", name: "测试演员" }],
       studios: [{ id: "s1", name: "测试厂商" }],
@@ -1564,20 +1887,37 @@ test("actor and studio facets show their names in applied filters", async ({
   await page.getByRole("button", { name: "刷新", exact: true }).click();
   await page.getByRole("button", { name: "筛选影片", exact: true }).click();
   const filter = page.getByRole("region", { name: "筛选影片" });
+  await filter.getByText("演员资料", { exact: true }).click();
   await filter
     .getByRole("group", { name: "演员筛选" })
     .getByRole("button", { name: "测试演员" })
     .click();
-  await filter
-    .getByRole("group", { name: "厂商筛选" })
-    .getByRole("button", { name: "测试厂商" })
-    .click();
+  await expect(filter.getByRole("group", { name: "厂商筛选" })).toHaveCount(0);
   await filter.getByRole("button", { name: "应用筛选" }).click();
   await expect(
     page.getByRole("button", { name: "移除筛选 演员：测试演员" }),
   ).toBeVisible();
   await expect(
     page.getByRole("button", { name: "移除筛选 厂商：测试厂商" }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "移除筛选 演员：测试演员" }).click();
+  await page
+    .getByRole("button", { name: "编辑 测试影片", exact: true })
+    .click();
+  await page.getByRole("button", { name: "管理演员资料", exact: true }).click();
+  const people = page.getByRole("dialog", { name: "演员资料管理" });
+  await people.getByRole("button", { name: "查看「测试演员」的影片" }).click();
+  await expect(
+    page.getByRole("button", { name: "移除筛选 演员：测试演员" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "测试影片", exact: true }).click();
+  await page
+    .getByRole("dialog", { name: "测试影片" })
+    .getByRole("button", { name: "测试演员", exact: true })
+    .click();
+  await expect(page.getByRole("dialog", { name: "测试影片" })).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "移除筛选 演员：测试演员" }),
   ).toBeVisible();
 });
 
@@ -1668,7 +2008,7 @@ test("neumorphic theme restores raised and inset surfaces with readable navigati
   });
   expect(colors.scheme).toBe("light");
   expect(colors.scrollbarWidth).toBe("thin");
-  expect(colors.body).toBe("rgb(224, 229, 236)");
+  expect(colors.body).toBe("rgb(233, 237, 242)");
   expect(colors.sidebarBlur).toBe("none");
   expect(colors.headerBlur).toBe("none");
   expect(colors.cardShadow).not.toBe("none");
@@ -1676,7 +2016,7 @@ test("neumorphic theme restores raised and inset surfaces with readable navigati
   expect(colors.searchShadow).toContain("inset");
   expect(colors.contrast).toBeGreaterThanOrEqual(4.5);
   expect(colors.titleContrast).toBeGreaterThanOrEqual(4.5);
-  await expect(page.getByRole("heading", { name: "影片资料库" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "全部影片" })).toBeVisible();
   await expect(
     page.getByRole("navigation", { name: "资料与系统管理" }),
   ).toBeVisible();

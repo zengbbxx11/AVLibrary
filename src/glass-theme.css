@@ -706,9 +706,12 @@ footer {
 }
 .compact-select {
   position: relative;
+  min-width: 0;
+  max-width: 100%;
 }
 .compact-select > button {
-  min-width: 96px;
+  min-width: min(96px, 100%);
+  max-width: 100%;
   min-height: 36px;
   justify-content: space-between;
   padding: 8px 10px 8px 12px;
@@ -717,12 +720,19 @@ footer {
   border: 1px solid rgba(228, 231, 255, 0.13);
   background: rgba(255, 255, 255, 0.055);
 }
+.compact-select > button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .compact-select > button:hover,
 .compact-select.open > button {
   background: rgba(255, 255, 255, 0.1);
   border-color: rgba(217, 205, 255, 0.4);
 }
 .compact-select > button svg {
+  flex: none;
   transition: transform 0.18s;
   color: #b9bdcc;
 }
@@ -730,13 +740,7 @@ footer {
   transform: rotate(180deg);
 }
 .compact-menu {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 7px);
-  z-index: 15;
-  min-width: max(100%, 155px);
-  max-height: 250px;
-  overflow-y: auto;
+  min-width: min(var(--popup-width), max(var(--anchor-width), 155px));
   margin: 0;
   padding: 5px;
   list-style: none;
@@ -755,7 +759,10 @@ footer {
   border-radius: 8px;
   color: #dbdce8;
   cursor: pointer;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+}
+.compact-menu li svg {
+  flex: none;
 }
 .compact-menu li.active {
   background: rgba(200, 184, 255, 0.16);

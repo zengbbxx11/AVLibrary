@@ -11,7 +11,7 @@ import type {
 } from "./types";
 export const desktop = isTauri();
 const traced = new Set(
-  "reset_auto_cover clear_subtitle test_player set_scan_interval reveal_data scan cancel_scan add_root toggle_root save_item set_removed save_tag delete_tag save_settings bind_subtitle import_cover launch reveal rename_video backup restore_backup save_entity delete_entity merge_entity save_filter delete_filter batch_edit set_tag_group set_root_kind set_root_type separate_file detach_root relocate_root choose_primary relink_file queue_metadata job_action candidate apply_metadata fetch_cover inspect_media queue_local trim_cache export_diagnostics".split(
+  "reset_auto_cover clear_subtitle test_player set_scan_interval reveal_data scan cancel_scan add_root toggle_root save_item set_removed save_tag delete_tag pin_tag organize_tags save_category delete_category set_root_category save_settings bind_subtitle import_cover launch reveal rename_video backup restore_backup save_entity delete_entity merge_entity save_filter delete_filter batch_edit set_tag_group set_root_kind set_root_type separate_file detach_root relocate_root choose_primary relink_file queue_metadata job_action candidate apply_metadata fetch_cover inspect_media queue_local trim_cache export_diagnostics".split(
     " ",
   ),
 );
@@ -72,7 +72,11 @@ export async function api<T>(
   args: Record<string, unknown> = {},
 ): Promise<T> {
   if (!desktop) {
-    if (["roots", "tags", "jobs", "file_choices"].includes(command))
+    if (
+      ["roots", "tags", "jobs", "file_choices", "search_suggestions"].includes(
+        command,
+      )
+    )
       return [] as T;
     if (command === "catalog")
       return {
@@ -135,9 +139,12 @@ export interface ListItemsRequest {
   limit: number;
   filters: Filters & { sort?: string };
 }
+export type SearchSuggestion = Pick<Item, "id" | "title" | "code">;
 
 export const libraryApi = {
   list: (request: ListItemsRequest) => api<Page>("list_items", { ...request }),
+  suggestions: (query: string) =>
+    api<SearchSuggestion[]>("search_suggestions", { query }),
   roots: () => api<Root[]>("roots"),
   tags: () => api<Tag[]>("tags"),
   catalog: () => api<Catalog>("catalog"),

@@ -1,8 +1,9 @@
 import React, { useState } from "react";
 import { X } from "lucide-react";
 import { Catalog, Entity, Filters, Tag, normalizeFilters } from "./types";
+import { groupTags } from "./tag-groups";
 
-type Facet = { id: string; name: string };
+type Facet = { id: string; name: string; groupId?: string | null };
 function FacetList({
   title,
   values,
@@ -10,6 +11,7 @@ function FacetList({
   change,
   all,
   changeAll,
+  groups,
 }: {
   title: string;
   values: Facet[];
@@ -17,53 +19,85 @@ function FacetList({
   change: (ids: string[]) => void;
   all?: boolean;
   changeAll?: () => void;
+  groups?: Entity[];
 }) {
   const [query, setQuery] = useState("");
   const visible = values.filter((value) =>
     value.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()),
   );
+  const sections = groups
+    ? groupTags(visible, groups)
+    : [{ id: "", name: "", tags: visible }];
   return (
     <div className="facet-row">
       <div className="facet-label">{title}</div>
       <div className="facet-content">
-        {values.length > 10 && (
+        {(groups || values.length > 10) && (
           <input
             className="facet-search"
             aria-label={`搜索${title}`}
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder={`搜索${title}`}
+            placeholder={groups ? "搜索自定义标签" : `搜索${title}`}
           />
         )}
-        <div className="facet-options" role="group" aria-label={`${title}筛选`}>
-          <button
-            type="button"
-            className={!selected.length ? "facet-chip selected" : "facet-chip"}
-            aria-pressed={!selected.length}
-            onClick={() => change([])}
-          >
-            全部
-          </button>
-          {visible.map((value) => (
+        <div
+          className={groups ? "tag-facets" : undefined}
+          role="group"
+          aria-label={`${title}筛选`}
+        >
+          <div className="facet-options">
             <button
               type="button"
-              key={value.id}
               className={
-                selected.includes(value.id)
-                  ? "facet-chip selected"
-                  : "facet-chip"
+                !selected.length ? "facet-chip selected" : "facet-chip"
               }
-              aria-pressed={selected.includes(value.id)}
-              onClick={() =>
-                change(
-                  selected.includes(value.id)
-                    ? selected.filter((id) => id !== value.id)
-                    : [...selected, value.id],
-                )
-              }
+              aria-pressed={!selected.length}
+              onClick={() => change([])}
             >
-              {value.name}
+              全部
             </button>
+            {changeAll && selected.length > 1 && (
+              <button
+                type="button"
+                className="match-mode"
+                aria-label={`${title}匹配方式`}
+                onClick={changeAll}
+              >
+                {all ? "满足全部" : "满足任一"}
+              </button>
+            )}
+          </div>
+          {sections.map((section) => (
+            <div
+              key={section.id}
+              className={groups ? "facet-tag-group" : undefined}
+            >
+              {section.name && <strong>{section.name}</strong>}
+              <div className="facet-options">
+                {section.tags.map((value) => (
+                  <button
+                    type="button"
+                    key={value.id}
+                    className={
+                      selected.includes(value.id)
+                        ? "facet-chip selected"
+                        : "facet-chip"
+                    }
+                    aria-pressed={selected.includes(value.id)}
+                    onClick={() =>
+                      change(
+                        selected.includes(value.id)
+                          ? selected.filter((id) => id !== value.id)
+                          : [...selected, value.id],
+                      )
+                    }
+                  >
+                    {value.name}
+                  </button>
+                ))}
+              </div>
+            </div>
           ))}
           {!visible.length && (
             <span className="facet-empty">
@@ -71,16 +105,6 @@ function FacetList({
             </span>
           )}
         </div>
-        {changeAll && selected.length > 1 && (
-          <button
-            type="button"
-            className="match-mode"
-            aria-label={`${title}匹配方式`}
-            onClick={changeAll}
-          >
-            {all ? "满足全部" : "满足任一"}
-          </button>
-        )}
       </div>
     </div>
   );
@@ -171,6 +195,21 @@ export function FilterPanel({
           {error}
         </p>
       )}
+      <FacetList
+        title="标签"
+        values={tags}
+        groups={catalog.tag_groups}
+        selected={draft.tags || []}
+        change={(tags) =>
+          setDraft({
+            ...draft,
+            tags,
+            allTags: tags.length ? draft.allTags : undefined,
+          })
+        }
+        all={draft.allTags}
+        changeAll={() => setDraft({ ...draft, allTags: !draft.allTags })}
+      />
       <div className="facet-row">
         <div className="facet-label">字幕</div>
         <div className="facet-options" role="group" aria-label="字幕筛选">
@@ -250,42 +289,30 @@ export function FilterPanel({
           ))}
         </div>
       </div>
-      <FacetList
-        title="标签"
-        values={tags}
-        selected={draft.tags || []}
-        change={(tags) =>
-          setDraft({
-            ...draft,
-            tags,
-            allTags: tags.length ? draft.allTags : undefined,
-          })
-        }
-        all={draft.allTags}
-        changeAll={() => setDraft({ ...draft, allTags: !draft.allTags })}
-      />
-      <FacetList
-        title="演员"
-        values={catalog.performers}
-        selected={draft.performers || []}
-        change={(performers) =>
-          setDraft({
-            ...draft,
-            performers,
-            allPerformers: performers.length ? draft.allPerformers : undefined,
-          })
-        }
-        all={draft.allPerformers}
-        changeAll={() =>
-          setDraft({ ...draft, allPerformers: !draft.allPerformers })
-        }
-      />
-      <FacetList
-        title="厂商"
-        values={catalog.studios}
-        selected={draft.studios || []}
-        change={(studios) => setDraft({ ...draft, studios })}
-      />
+      <details
+        className="filter-details"
+        open={draft.performers?.length ? true : undefined}
+      >
+        <summary>演员资料</summary>
+        <FacetList
+          title="演员"
+          values={catalog.performers}
+          selected={draft.performers || []}
+          change={(performers) =>
+            setDraft({
+              ...draft,
+              performers,
+              allPerformers: performers.length
+                ? draft.allPerformers
+                : undefined,
+            })
+          }
+          all={draft.allPerformers}
+          changeAll={() =>
+            setDraft({ ...draft, allPerformers: !draft.allPerformers })
+          }
+        />
+      </details>
       <details className="filter-details">
         <summary>自定义范围</summary>
         <div className="filter-ranges">

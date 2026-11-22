@@ -323,7 +323,7 @@ test("changed subtitle prompts for a one-time fallback without changing binding"
     };
   });
   await page.goto("/");
-  await expect(page.getByText(/30 秒/)).toBeVisible();
+  await expect(page.getByText("00:30", { exact: true })).toBeVisible();
   await expect(page.getByText("字幕文件已变化", { exact: true })).toBeVisible();
   await page
     .getByRole("button", { name: "播放 字幕替换测试", exact: true })

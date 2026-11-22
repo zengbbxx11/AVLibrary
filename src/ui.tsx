@@ -72,6 +72,11 @@ export function Modal({
       )
         return;
       if (e.key === "Escape") {
+        if (
+          e.target instanceof Element &&
+          e.target.closest("[data-popup-open]")
+        )
+          return;
         e.preventDefault();
         e.stopPropagation();
         if (!lockedRef.current) closeRef.current();
@@ -238,6 +243,34 @@ export function useDialogs() {
   );
   return { askText, askConfirm, dialog };
 }
+const pendingCovers = new Map<Element, () => void>();
+let coverObserver: IntersectionObserver | undefined;
+
+function observeCover(element: Element, load: () => void) {
+  if (typeof IntersectionObserver !== "function") {
+    load();
+    return;
+  }
+  const observer = (coverObserver ??= new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        const loadCover = pendingCovers.get(entry.target);
+        pendingCovers.delete(entry.target);
+        observer.unobserve(entry.target);
+        loadCover?.();
+      }
+    },
+    { rootMargin: "240px" },
+  ));
+  pendingCovers.set(element, load);
+  observer.observe(element);
+  return () => {
+    pendingCovers.delete(element);
+    observer.unobserve(element);
+  };
+}
+
 export function Cover({
   name,
   label,
@@ -248,16 +281,21 @@ export function Cover({
   type?: string;
 }) {
   const [image, setImage] = useState<{ name: string; url: string }>();
+  const placeholder = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    const element = placeholder.current;
+    if (!name || !element) return;
     let live = true;
-    if (name)
+    const stop = observeCover(element, () =>
       api<string>("cover_path", { name })
         .then((p) => {
           if (live) setImage({ name, url: convertFileSrc(p) });
         })
-        .catch(() => {});
+        .catch(() => {}),
+    );
     return () => {
       live = false;
+      stop?.();
     };
   }, [name]);
   return image?.name === name ? (
@@ -265,12 +303,13 @@ export function Cover({
       src={image.url}
       alt="影片封面"
       loading="lazy"
+      decoding="async"
       onError={() =>
         setImage((current) => (current === image ? undefined : current))
       }
     />
   ) : (
-    <div className={"placeholder " + type}>
+    <div ref={placeholder} className={"placeholder " + type}>
       <Film size={42} />
       <span>{label || "本地影片"}</span>
     </div>

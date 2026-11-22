@@ -1,18 +1,18 @@
 {
-  "verifiedAt": "2026-11-19T01:16:41.645Z",
-  "version": "0.13.2",
-  "archive": "release/AVLibrary-0.13.2-Windows-x64.zip",
-  "archiveBytes": 7653492,
-  "archiveSha256": "8c8acf446c8371fe7b55773528178c364a52ce1e63bf989f1cd2ac47da491b56",
+  "verifiedAt": "2026-11-22T00:44:06.577Z",
+  "version": "0.15.2",
+  "archive": "release/AVLibrary-0.15.2-Windows-x64.zip",
+  "archiveBytes": 7683662,
+  "archiveSha256": "79ff32cb5357137f8377a04417a5cff8200533827853f9126d1a3c8c2c93c42b",
   "fileCount": 1,
   "archiveExtractedAndExeHashVerified": true,
   "exeWindowsX64": true,
   "testDebugArgumentAbsent": true,
-  "documentationArchive": "release/AVLibrary-0.13.2-Documentation.zip",
+  "documentationArchive": "release/AVLibrary-0.15.2-Documentation.zip",
   "verification": {
-    "rust": 60,
+    "rust": 64,
     "sqliteConstraints": 5,
-    "browserUi": 46,
+    "browserUi": 51,
     "nativeWorkerScenarios": 2
   },
   "acceptanceStatus": "partial; see IMPLEMENTATION_STATUS.md"
